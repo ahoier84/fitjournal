@@ -1,8 +1,11 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { Link } from 'react-router'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/database'
+import { query, where, Timestamp } from 'firebase/firestore'
+import { useAuth } from '@/contexts/AuthContext'
+import { userCollection } from '@/db/database'
+import { useFirestoreQuery } from '@/hooks/useFirestoreQuery'
+import type { Workout } from '@/db/models'
 import {
   format,
   startOfMonth,
@@ -20,6 +23,7 @@ import { formatDuration, getWorkoutColor } from '@/lib/workout-utils'
 import { cn } from '@/lib/utils'
 
 export function CalendarPage() {
+  const { user } = useAuth()
   const [currentMonth, setCurrentMonth] = useState(new Date())
   const [selectedDate, setSelectedDate] = useState<Date | null>(null)
 
@@ -29,16 +33,19 @@ export function CalendarPage() {
   const calendarEnd = endOfWeek(monthEnd, { weekStartsOn: 1 })
   const calendarDays = eachDayOfInterval({ start: calendarStart, end: calendarEnd })
 
-  // Get all workouts for visible month range
-  const workouts = useLiveQuery(async () => {
-    return db.workouts
-      .where('startDate')
-      .between(calendarStart, calendarEnd, true, true)
-      .toArray()
-  }, [calendarStart.getTime(), calendarEnd.getTime()])
+  const q = useMemo(() => {
+    if (!user) return null
+    return query(
+      userCollection(user.uid, 'workouts'),
+      where('startDate', '>=', Timestamp.fromDate(calendarStart)),
+      where('startDate', '<=', Timestamp.fromDate(calendarEnd)),
+    )
+  }, [user, calendarStart.getTime(), calendarEnd.getTime()])
+
+  const workouts = useFirestoreQuery<Workout>(q, [user?.uid, calendarStart.getTime(), calendarEnd.getTime()])
 
   // Group workouts by day
-  const workoutsByDay = new Map<string, typeof workouts>()
+  const workoutsByDay = new Map<string, Workout[]>()
   workouts?.forEach(w => {
     const dateStr = toDateString(new Date(w.startDate))
     if (!workoutsByDay.has(dateStr)) workoutsByDay.set(dateStr, [])

@@ -1,28 +1,50 @@
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/database'
+import { useMemo } from 'react'
+import { query, where, limit, getDocs, addDoc, updateDoc, Timestamp } from 'firebase/firestore'
+import { useAuth } from '@/contexts/AuthContext'
+import { userCollection } from '@/db/database'
+import { useFirestoreQuery } from './useFirestoreQuery'
 import type { JournalEntry } from '@/db/models'
 
-export function useJournalEntry(workoutId: number | undefined) {
-  return useLiveQuery(
-    () => workoutId ? db.journalEntries.where('workoutId').equals(workoutId).first() : undefined,
-    [workoutId]
-  )
+export function useJournalEntry(workoutId: string | undefined) {
+  const { user } = useAuth()
+
+  const q = useMemo(() => {
+    if (!user || !workoutId) return null
+    return query(userCollection(user.uid, 'journalEntries'), where('workoutId', '==', workoutId), limit(1))
+  }, [user, workoutId])
+
+  const results = useFirestoreQuery<JournalEntry>(q, [user?.uid, workoutId])
+
+  return results?.[0]
 }
 
-export async function saveJournalEntry(entry: Omit<JournalEntry, 'id' | 'createdAt' | 'updatedAt'> & { id?: number }) {
-  const now = new Date()
-  if (entry.id) {
-    await db.journalEntries.update(entry.id, { ...entry, updatedAt: now })
+export async function saveJournalEntry(
+  uid: string,
+  entry: Omit<JournalEntry, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
+) {
+  const now = Timestamp.now()
+  const col = userCollection(uid, 'journalEntries')
+
+  // Check if entry with this workoutId already exists
+  const existing = await getDocs(query(col, where('workoutId', '==', entry.workoutId), limit(1)))
+
+  if (!existing.empty) {
+    const docRef = existing.docs[0].ref
+    const { id: _id, ...data } = entry
+    await updateDoc(docRef, { ...data, updatedAt: now })
   } else {
-    const existing = await db.journalEntries.where('workoutId').equals(entry.workoutId).first()
-    if (existing) {
-      await db.journalEntries.update(existing.id!, { ...entry, updatedAt: now })
-    } else {
-      await db.journalEntries.add({ ...entry, createdAt: now, updatedAt: now } as JournalEntry)
-    }
+    const { id: _id, ...data } = entry
+    await addDoc(col, { ...data, createdAt: now, updatedAt: now })
   }
 }
 
 export function useJournalEntries() {
-  return useLiveQuery(() => db.journalEntries.toArray())
+  const { user } = useAuth()
+
+  const q = useMemo(() => {
+    if (!user) return null
+    return query(userCollection(user.uid, 'journalEntries'))
+  }, [user])
+
+  return useFirestoreQuery<JournalEntry>(q, [user?.uid])
 }

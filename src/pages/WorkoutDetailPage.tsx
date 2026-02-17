@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useParams, Link } from 'react-router'
 import { ArrowLeft, Clock, Flame, MapPin, Smartphone, Camera, X } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
 import { useWorkout } from '@/hooks/useWorkouts'
 import { useJournalEntry, saveJournalEntry } from '@/hooks/useJournalEntry'
 import { formatDateTime } from '@/lib/date-utils'
@@ -44,10 +45,10 @@ function RatingSelector({ label, value, onChange, emojis, labels }: {
 }
 
 export function WorkoutDetailPage() {
+  const { user } = useAuth()
   const { id } = useParams()
-  const workoutId = id ? parseInt(id) : undefined
-  const workout = useWorkout(workoutId)
-  const existingEntry = useJournalEntry(workoutId)
+  const workout = useWorkout(id)
+  const existingEntry = useJournalEntry(id)
 
   const [notes, setNotes] = useState('')
   const [moodBefore, setMoodBefore] = useState(0)
@@ -68,17 +69,17 @@ export function WorkoutDetailPage() {
     setEnergyAfter(existingEntry.energyAfter)
     setPhotos(existingEntry.photos)
     setInitialized(true)
-  } else if (existingEntry === undefined && workoutId && !initialized) {
+  } else if (existingEntry === undefined && id && !initialized) {
     setInitialized(true)
   }
 
   const handleSave = useCallback(async () => {
-    if (!workoutId) return
+    if (!id || !user) return
     setSaving(true)
     try {
-      await saveJournalEntry({
+      await saveJournalEntry(user.uid, {
         id: existingEntry?.id,
-        workoutId,
+        workoutId: id,
         notes,
         moodBefore,
         energyBefore,
@@ -91,7 +92,7 @@ export function WorkoutDetailPage() {
     } finally {
       setSaving(false)
     }
-  }, [workoutId, existingEntry?.id, notes, moodBefore, energyBefore, moodAfter, energyAfter, photos])
+  }, [user, id, existingEntry?.id, notes, moodBefore, energyBefore, moodAfter, energyAfter, photos])
 
   const handlePhotoUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files

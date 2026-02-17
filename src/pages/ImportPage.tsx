@@ -1,12 +1,16 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useMemo } from 'react'
 import { Upload, FileUp, CheckCircle, AlertCircle, Clock } from 'lucide-react'
+import { query, orderBy } from 'firebase/firestore'
+import { useAuth } from '@/contexts/AuthContext'
+import { userCollection } from '@/db/database'
+import { useFirestoreQuery } from '@/hooks/useFirestoreQuery'
 import { parseHealthExport, type ImportProgress, type ImportResult } from '@/import/health-xml-parser'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/database'
+import type { ImportRecord } from '@/db/models'
 import { formatDate } from '@/lib/date-utils'
 import { cn } from '@/lib/utils'
 
 export function ImportPage() {
+  const { user } = useAuth()
   const [importing, setImporting] = useState(false)
   const [progress, setProgress] = useState<ImportProgress | null>(null)
   const [result, setResult] = useState<ImportResult | null>(null)
@@ -14,9 +18,15 @@ export function ImportPage() {
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const importRecords = useLiveQuery(() => db.importRecords.orderBy('importedAt').reverse().toArray())
+  const importQuery = useMemo(() => {
+    if (!user) return null
+    return query(userCollection(user.uid, 'importRecords'), orderBy('importedAt', 'desc'))
+  }, [user])
+
+  const importRecords = useFirestoreQuery<ImportRecord>(importQuery, [user?.uid])
 
   const handleFile = useCallback(async (file: File) => {
+    if (!user) return
     if (!file.name.endsWith('.xml') && !file.name.endsWith('.zip')) {
       setError('Please select an Apple Health export file (.xml or .zip)')
       return
@@ -28,7 +38,7 @@ export function ImportPage() {
     setError(null)
 
     try {
-      const importResult = await parseHealthExport(file, (p) => {
+      const importResult = await parseHealthExport(user.uid, file, (p) => {
         setProgress({ ...p })
       })
       setResult(importResult)
@@ -37,7 +47,7 @@ export function ImportPage() {
     } finally {
       setImporting(false)
     }
-  }, [])
+  }, [user])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()

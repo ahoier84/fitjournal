@@ -1,42 +1,40 @@
-import { useState, useCallback } from 'react'
-import { Download, Upload, Trash2, HardDrive, AlertTriangle } from 'lucide-react'
-import { db } from '@/db/database'
-import { useLiveQuery } from 'dexie-react-hooks'
+import { useState, useCallback, useMemo } from 'react'
+import { Download, Upload, Trash2, HardDrive, AlertTriangle, LogOut } from 'lucide-react'
+import { getDocs, writeBatch, doc } from 'firebase/firestore'
+import { firestore } from '@/lib/firebase'
+import { useAuth } from '@/contexts/AuthContext'
+import { userCollection } from '@/db/database'
+import { useFirestoreQuery } from '@/hooks/useFirestoreQuery'
+import type { Workout, DailyMetric, ActivitySummary, JournalEntry, ImportRecord } from '@/db/models'
 
 export function SettingsPage() {
+  const { user, logout } = useAuth()
   const [clearing, setClearing] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [exportStatus, setExportStatus] = useState<string | null>(null)
 
-  const counts = useLiveQuery(async () => {
-    const workouts = await db.workouts.count()
-    const metrics = await db.dailyMetrics.count()
-    const summaries = await db.activitySummaries.count()
-    const journals = await db.journalEntries.count()
-    const imports = await db.importRecords.count()
-    return { workouts, metrics, summaries, journals, imports }
-  })
+  const workoutsQ = useMemo(() => user ? userCollection(user.uid, 'workouts') : null, [user])
+  const metricsQ = useMemo(() => user ? userCollection(user.uid, 'dailyMetrics') : null, [user])
+  const summariesQ = useMemo(() => user ? userCollection(user.uid, 'activitySummaries') : null, [user])
+  const journalsQ = useMemo(() => user ? userCollection(user.uid, 'journalEntries') : null, [user])
+  const importsQ = useMemo(() => user ? userCollection(user.uid, 'importRecords') : null, [user])
 
-  const storageEstimate = useLiveQuery(async () => {
-    if (navigator.storage && navigator.storage.estimate) {
-      const estimate = await navigator.storage.estimate()
-      return {
-        usage: estimate.usage ?? 0,
-        quota: estimate.quota ?? 0,
-      }
-    }
-    return null
-  })
+  const workouts = useFirestoreQuery<Workout>(workoutsQ, [user?.uid, 'workouts'])
+  const metrics = useFirestoreQuery<DailyMetric>(metricsQ, [user?.uid, 'metrics'])
+  const summaries = useFirestoreQuery<ActivitySummary>(summariesQ, [user?.uid, 'summaries'])
+  const journals = useFirestoreQuery<JournalEntry>(journalsQ, [user?.uid, 'journals'])
+  const imports = useFirestoreQuery<ImportRecord>(importsQ, [user?.uid, 'imports'])
 
   const handleExport = useCallback(async () => {
+    if (!user) return
     try {
       setExportStatus('Exporting...')
       const data = {
-        workouts: await db.workouts.toArray(),
-        dailyMetrics: await db.dailyMetrics.toArray(),
-        activitySummaries: await db.activitySummaries.toArray(),
-        journalEntries: await db.journalEntries.toArray(),
-        importRecords: await db.importRecords.toArray(),
+        workouts: workouts ?? [],
+        dailyMetrics: metrics ?? [],
+        activitySummaries: summaries ?? [],
+        journalEntries: journals ?? [],
+        importRecords: imports ?? [],
         exportedAt: new Date().toISOString(),
       }
 
@@ -52,20 +50,33 @@ export function SettingsPage() {
     } catch {
       setExportStatus('Export failed')
     }
-  }, [])
+  }, [user, workouts, metrics, summaries, journals, imports])
 
   const handleImportBackup = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file) return
+    if (!file || !user) return
 
     try {
+      setExportStatus('Restoring...')
       const text = await file.text()
       const data = JSON.parse(text)
 
-      if (data.workouts) await db.workouts.bulkPut(data.workouts)
-      if (data.dailyMetrics) await db.dailyMetrics.bulkPut(data.dailyMetrics)
-      if (data.activitySummaries) await db.activitySummaries.bulkPut(data.activitySummaries)
-      if (data.journalEntries) await db.journalEntries.bulkPut(data.journalEntries)
+      const collections = ['workouts', 'dailyMetrics', 'activitySummaries', 'journalEntries'] as const
+      for (const col of collections) {
+        if (data[col] && Array.isArray(data[col])) {
+          const items = data[col] as Record<string, unknown>[]
+          for (let i = 0; i < items.length; i += 500) {
+            const batch = writeBatch(firestore)
+            const chunk = items.slice(i, i + 500)
+            for (const item of chunk) {
+              const { id: _id, ...rest } = item
+              const ref = doc(userCollection(user.uid, col))
+              batch.set(ref, rest)
+            }
+            await batch.commit()
+          }
+        }
+      }
 
       setExportStatus('Backup restored!')
       setTimeout(() => setExportStatus(null), 3000)
@@ -74,32 +85,55 @@ export function SettingsPage() {
     }
 
     e.target.value = ''
-  }, [])
+  }, [user])
 
   const handleClearAll = useCallback(async () => {
+    if (!user) return
     setClearing(true)
     try {
-      await db.workouts.clear()
-      await db.dailyMetrics.clear()
-      await db.activitySummaries.clear()
-      await db.journalEntries.clear()
-      await db.importRecords.clear()
+      const collections = ['workouts', 'dailyMetrics', 'activitySummaries', 'journalEntries', 'importRecords']
+      for (const col of collections) {
+        const snap = await getDocs(userCollection(user.uid, col))
+        for (let i = 0; i < snap.docs.length; i += 500) {
+          const batch = writeBatch(firestore)
+          const chunk = snap.docs.slice(i, i + 500)
+          for (const d of chunk) {
+            batch.delete(d.ref)
+          }
+          await batch.commit()
+        }
+      }
     } finally {
       setClearing(false)
       setShowConfirm(false)
     }
-  }, [])
-
-  function formatBytes(bytes: number) {
-    if (bytes < 1024) return bytes + ' B'
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
-  }
+  }, [user])
 
   return (
     <div className="max-w-2xl">
       <h2 className="text-2xl font-bold mb-6">Settings</h2>
+
+      {/* Account */}
+      <div className="bg-card rounded-xl border border-border p-5 mb-6">
+        <h3 className="font-medium mb-4">Account</h3>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {user?.photoURL && (
+              <img src={user.photoURL} alt="" className="w-10 h-10 rounded-full" />
+            )}
+            <div>
+              <p className="font-medium">{user?.displayName}</p>
+              <p className="text-sm text-muted-foreground">{user?.email}</p>
+            </div>
+          </div>
+          <button
+            onClick={logout}
+            className="flex items-center gap-2 px-4 py-2.5 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors"
+          >
+            <LogOut className="w-4 h-4" /> Sign Out
+          </button>
+        </div>
+      </div>
 
       {/* Data Summary */}
       <div className="bg-card rounded-xl border border-border p-5 mb-6">
@@ -109,30 +143,24 @@ export function SettingsPage() {
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
           <div>
             <p className="text-muted-foreground">Workouts</p>
-            <p className="text-lg font-semibold">{counts?.workouts ?? 0}</p>
+            <p className="text-lg font-semibold">{workouts?.length ?? 0}</p>
           </div>
           <div>
             <p className="text-muted-foreground">Daily Metrics</p>
-            <p className="text-lg font-semibold">{counts?.metrics ?? 0}</p>
+            <p className="text-lg font-semibold">{metrics?.length ?? 0}</p>
           </div>
           <div>
             <p className="text-muted-foreground">Activity Summaries</p>
-            <p className="text-lg font-semibold">{counts?.summaries ?? 0}</p>
+            <p className="text-lg font-semibold">{summaries?.length ?? 0}</p>
           </div>
           <div>
             <p className="text-muted-foreground">Journal Entries</p>
-            <p className="text-lg font-semibold">{counts?.journals ?? 0}</p>
+            <p className="text-lg font-semibold">{journals?.length ?? 0}</p>
           </div>
           <div>
             <p className="text-muted-foreground">Imports</p>
-            <p className="text-lg font-semibold">{counts?.imports ?? 0}</p>
+            <p className="text-lg font-semibold">{imports?.length ?? 0}</p>
           </div>
-          {storageEstimate && (
-            <div>
-              <p className="text-muted-foreground">Storage Used</p>
-              <p className="text-lg font-semibold">{formatBytes(storageEstimate.usage)}</p>
-            </div>
-          )}
         </div>
       </div>
 

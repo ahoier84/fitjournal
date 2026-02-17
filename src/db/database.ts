@@ -1,30 +1,10 @@
-import Dexie, { type Table } from 'dexie'
-import type {
-  Workout,
-  DailyMetric,
-  ActivitySummary,
-  JournalEntry,
-  ImportRecord,
-} from './models'
+import { collection, doc } from 'firebase/firestore'
+import { firestore } from '@/lib/firebase'
 
-export class FitnessDatabase extends Dexie {
-  workouts!: Table<Workout>
-  dailyMetrics!: Table<DailyMetric>
-  activitySummaries!: Table<ActivitySummary>
-  journalEntries!: Table<JournalEntry>
-  importRecords!: Table<ImportRecord>
-
-  constructor() {
-    super('FitnessTracker')
-
-    this.version(1).stores({
-      workouts: '++id, sourceId, workoutActivityType, startDate, [workoutActivityType+startDate]',
-      dailyMetrics: '++id, [date+metricType], date, metricType',
-      activitySummaries: '++id, &date',
-      journalEntries: '++id, &workoutId, createdAt',
-      importRecords: '++id, importedAt',
-    })
-  }
+export function userCollection(uid: string, collectionName: string) {
+  return collection(firestore, 'users', uid, collectionName)
 }
 
-export const db = new FitnessDatabase()
+export function userDoc(uid: string, collectionName: string, docId: string) {
+  return doc(firestore, 'users', uid, collectionName, docId)
+}

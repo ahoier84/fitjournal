@@ -1,5 +1,5 @@
 export interface Workout {
-  id?: number
+  id?: string
   sourceId: string
   workoutActivityType: string
   activityName: string
@@ -14,7 +14,7 @@ export interface Workout {
 }
 
 export interface DailyMetric {
-  id?: number
+  id?: string // "{date}_{metricType}"
   date: string // "YYYY-MM-DD"
   metricType: 'steps' | 'activeEnergy' | 'distanceWalkingRunning'
   value: number
@@ -23,7 +23,7 @@ export interface DailyMetric {
 }
 
 export interface ActivitySummary {
-  id?: number
+  id?: string // "{date}"
   date: string // "YYYY-MM-DD"
   activeEnergyBurned: number
   activeEnergyBurnedGoal: number
@@ -35,8 +35,8 @@ export interface ActivitySummary {
 }
 
 export interface JournalEntry {
-  id?: number
-  workoutId: number
+  id?: string
+  workoutId: string
   notes: string
   moodBefore: number // 1-5
   energyBefore: number // 1-5
@@ -48,7 +48,7 @@ export interface JournalEntry {
 }
 
 export interface ImportRecord {
-  id?: number
+  id?: string
   filename: string
   importedAt: Date
   workoutsImported: number

@@ -1,44 +1,64 @@
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/database'
+import { useMemo } from 'react'
+import { query, where, Timestamp } from 'firebase/firestore'
+import { useAuth } from '@/contexts/AuthContext'
+import { userCollection } from '@/db/database'
+import { useFirestoreQuery } from './useFirestoreQuery'
 import { toDateString, subDays } from '@/lib/date-utils'
 import { eachDayOfInterval } from 'date-fns'
+import type { DailyMetric } from '@/db/models'
+import type { Workout } from '@/db/models'
 
 export type MetricType = 'steps' | 'activeEnergy' | 'distanceWalkingRunning'
 
 export function useActivityTrends(metricType: MetricType, days: number) {
+  const { user } = useAuth()
   const endDate = new Date()
   const startDate = subDays(endDate, days - 1)
   const startStr = toDateString(startDate)
   const endStr = toDateString(endDate)
 
-  return useLiveQuery(async () => {
-    const metrics = await db.dailyMetrics
-      .where('[date+metricType]')
-      .between([startStr, metricType], [endStr, metricType], true, true)
-      .toArray()
+  const q = useMemo(() => {
+    if (!user) return null
+    return query(
+      userCollection(user.uid, 'dailyMetrics'),
+      where('metricType', '==', metricType),
+      where('date', '>=', startStr),
+      where('date', '<=', endStr),
+    )
+  }, [user, metricType, startStr, endStr])
+
+  const metrics = useFirestoreQuery<DailyMetric>(q, [user?.uid, metricType, days])
+
+  return useMemo(() => {
+    if (!metrics) return undefined
 
     const valueMap = new Map(metrics.map(m => [m.date, m.value]))
-
     const allDays = eachDayOfInterval({ start: startDate, end: endDate })
     return allDays.map(d => {
       const dateStr = toDateString(d)
-      return {
-        date: dateStr,
-        value: valueMap.get(dateStr) ?? 0,
-      }
+      return { date: dateStr, value: valueMap.get(dateStr) ?? 0 }
     })
-  }, [metricType, days])
+  }, [metrics, days])
 }
 
 export function useWorkoutFrequency(days: number) {
+  const { user } = useAuth()
   const endDate = new Date()
   const startDate = subDays(endDate, days - 1)
 
-  return useLiveQuery(async () => {
-    const workouts = await db.workouts
-      .where('startDate')
-      .between(startDate, endDate, true, true)
-      .toArray()
+  const q = useMemo(() => {
+    if (!user) return null
+    return query(
+      userCollection(user.uid, 'workouts'),
+      where('startDate', '>=', Timestamp.fromDate(startDate)),
+      where('startDate', '<=', Timestamp.fromDate(endDate)),
+    )
+  }, [user, days])
+
+  const workouts = useFirestoreQuery<Workout>(q, [user?.uid, days])
+
+  return useMemo(() => {
+    if (!workouts) return undefined
 
     const weekMap = new Map<string, number>()
     for (const w of workouts) {
@@ -50,5 +70,5 @@ export function useWorkoutFrequency(days: number) {
     return Array.from(weekMap.entries())
       .map(([week, count]) => ({ week, count }))
       .sort((a, b) => a.week.localeCompare(b.week))
-  }, [days])
+  }, [workouts])
 }

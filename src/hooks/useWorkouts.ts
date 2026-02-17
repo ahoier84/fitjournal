@@ -1,5 +1,9 @@
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/database'
+import { useMemo } from 'react'
+import { query, orderBy } from 'firebase/firestore'
+import { useAuth } from '@/contexts/AuthContext'
+import { userCollection, userDoc } from '@/db/database'
+import { useFirestoreQuery, useFirestoreDoc } from './useFirestoreQuery'
+import type { Workout } from '@/db/models'
 
 export interface WorkoutFilters {
   activityType?: string
@@ -11,10 +15,19 @@ export interface WorkoutFilters {
 }
 
 export function useWorkouts(filters: WorkoutFilters = {}) {
-  return useLiveQuery(async () => {
-    let collection = db.workouts.orderBy('startDate')
+  const { user } = useAuth()
 
-    let results = await collection.reverse().toArray()
+  const q = useMemo(() => {
+    if (!user) return null
+    return query(userCollection(user.uid, 'workouts'), orderBy('startDate', 'desc'))
+  }, [user])
+
+  const raw = useFirestoreQuery<Workout>(q, [user?.uid])
+
+  return useMemo(() => {
+    if (!raw) return undefined
+
+    let results = [...raw]
 
     if (filters.activityType && filters.activityType !== 'all') {
       results = results.filter(w => w.activityName === filters.activityType)
@@ -39,20 +52,26 @@ export function useWorkouts(filters: WorkoutFilters = {}) {
     }
 
     return results
-  }, [filters.activityType, filters.startDate?.getTime(), filters.endDate?.getTime(), filters.sortBy, filters.sortOrder, filters.limit])
+  }, [raw, filters.activityType, filters.startDate, filters.endDate, filters.sortBy, filters.sortOrder, filters.limit])
 }
 
-export function useWorkout(id: number | undefined) {
-  return useLiveQuery(
-    () => id ? db.workouts.get(id) : undefined,
-    [id]
-  )
+export function useWorkout(id: string | undefined) {
+  const { user } = useAuth()
+
+  const docRef = useMemo(() => {
+    if (!user || !id) return null
+    return userDoc(user.uid, 'workouts', id)
+  }, [user, id])
+
+  return useFirestoreDoc<Workout>(docRef, [user?.uid, id])
 }
 
 export function useWorkoutTypes() {
-  return useLiveQuery(async () => {
-    const workouts = await db.workouts.toArray()
+  const workouts = useWorkouts()
+
+  return useMemo(() => {
+    if (!workouts) return undefined
     const types = new Set(workouts.map(w => w.activityName))
     return Array.from(types).sort()
-  })
+  }, [workouts])
 }

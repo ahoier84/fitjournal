@@ -1,5 +1,6 @@
-import { db } from '@/db/database'
-import type { Workout, DailyMetric, ActivitySummary } from '@/db/models'
+import { writeBatch, doc, getDocs, query } from 'firebase/firestore'
+import { firestore } from '@/lib/firebase'
+import { userCollection, userDoc } from '@/db/database'
 import type { WorkerMessage } from './health-xml-worker'
 import { unzipSync, strFromU8 } from 'fflate'
 
@@ -34,7 +35,20 @@ async function readFileAsText(file: File): Promise<string> {
   return file.text()
 }
 
+async function commitBatches<T>(items: T[], writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
+  // Firestore batch limit is 500 operations
+  for (let i = 0; i < items.length; i += 500) {
+    const batch = writeBatch(firestore)
+    const chunk = items.slice(i, i + 500)
+    for (const item of chunk) {
+      writeFn(batch, item)
+    }
+    await batch.commit()
+  }
+}
+
 export async function parseHealthExport(
+  uid: string,
   file: File,
   onProgress: (progress: ImportProgress) => void
 ): Promise<ImportResult> {
@@ -76,13 +90,14 @@ export async function parseHealthExport(
           onProgress({ bytesRead: totalBytes, totalBytes, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
           // Check for existing sourceIds to avoid duplicates
-          const existingIds = new Set(
-            (await db.workouts.toArray()).map(w => w.sourceId)
-          )
+          const existingSnap = await getDocs(query(userCollection(uid, 'workouts')))
+          const existingIds = new Set(existingSnap.docs.map(d => d.data().sourceId as string))
 
-          const newWorkouts: Workout[] = msg.data
-            .filter(w => !existingIds.has(w.sourceId))
-            .map(w => ({
+          const newWorkouts = msg.data.filter(w => !existingIds.has(w.sourceId))
+
+          await commitBatches(newWorkouts, (batch, w) => {
+            const ref = doc(userCollection(uid, 'workouts'))
+            batch.set(ref, {
               sourceId: w.sourceId,
               workoutActivityType: w.workoutActivityType,
               activityName: w.activityName,
@@ -94,43 +109,33 @@ export async function parseHealthExport(
               endDate: new Date(w.endDate),
               creationDate: new Date(w.creationDate),
               importedAt: new Date(),
-            }))
-
-          if (newWorkouts.length > 0) {
-            await db.workouts.bulkAdd(newWorkouts)
-          }
+            })
+          })
           totalWorkouts += newWorkouts.length
           break
         }
 
         case 'dailyMetrics': {
-          const metrics: DailyMetric[] = msg.data.map(m => ({
+          const metrics = msg.data.map(m => ({
             date: m.date,
-            metricType: m.metricType as DailyMetric['metricType'],
+            metricType: m.metricType,
             value: m.value,
             unit: m.unit,
             updatedAt: new Date(),
           }))
 
-          // Upsert: for each date+metricType, update if exists, add if not
-          for (const metric of metrics) {
-            const existing = await db.dailyMetrics
-              .where('[date+metricType]')
-              .equals([metric.date, metric.metricType])
-              .first()
-
-            if (existing) {
-              await db.dailyMetrics.update(existing.id!, { value: metric.value, updatedAt: metric.updatedAt })
-            } else {
-              await db.dailyMetrics.add(metric)
-            }
-          }
+          // Use composite doc ID for upsert: date_metricType
+          await commitBatches(metrics, (batch, metric) => {
+            const docId = `${metric.date}_${metric.metricType}`
+            const ref = userDoc(uid, 'dailyMetrics', docId)
+            batch.set(ref, metric, { merge: true })
+          })
           totalRecords += metrics.length
           break
         }
 
         case 'activitySummaries': {
-          const summaries: ActivitySummary[] = msg.data.map(s => ({
+          const summaries = msg.data.map(s => ({
             date: s.date,
             activeEnergyBurned: s.activeEnergyBurned,
             activeEnergyBurnedGoal: s.activeEnergyBurnedGoal,
@@ -141,14 +146,11 @@ export async function parseHealthExport(
             importedAt: new Date(),
           }))
 
-          for (const summary of summaries) {
-            const existing = await db.activitySummaries.where('date').equals(summary.date).first()
-            if (existing) {
-              await db.activitySummaries.update(existing.id!, summary)
-            } else {
-              await db.activitySummaries.add(summary)
-            }
-          }
+          // Use date as doc ID for upsert
+          await commitBatches(summaries, (batch, summary) => {
+            const ref = userDoc(uid, 'activitySummaries', summary.date)
+            batch.set(ref, summary, { merge: true })
+          })
           totalSummaries += summaries.length
           break
         }
@@ -159,7 +161,9 @@ export async function parseHealthExport(
           const durationMs = performance.now() - startTime
 
           // Save import record
-          await db.importRecords.add({
+          const importRef = doc(userCollection(uid, 'importRecords'))
+          const batch = writeBatch(firestore)
+          batch.set(importRef, {
             filename: file.name,
             importedAt: new Date(),
             workoutsImported: totalWorkouts,
@@ -167,6 +171,7 @@ export async function parseHealthExport(
             activitySummariesImported: totalSummaries,
             durationMs,
           })
+          await batch.commit()
 
           onProgress({ bytesRead: totalBytes, totalBytes, workoutsFound: totalWorkouts, recordsProcessed: totalRecords, phase: 'complete' })
 

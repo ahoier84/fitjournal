@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router'
-import { LayoutDashboard, Dumbbell, Calendar, TrendingUp, Upload, Settings } from 'lucide-react'
+import { LayoutDashboard, Dumbbell, Calendar, TrendingUp, Upload, Settings, LogOut } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
 import { cn } from '@/lib/utils'
 
 const navItems = [
@@ -12,6 +13,8 @@ const navItems = [
 ]
 
 export function Sidebar() {
+  const { user, logout } = useAuth()
+
   return (
     <aside className="w-64 bg-sidebar border-r border-border flex flex-col h-screen sticky top-0">
       <div className="p-6">
@@ -41,7 +44,24 @@ export function Sidebar() {
         ))}
       </nav>
       <div className="p-4 border-t border-border">
-        <p className="text-xs text-muted-foreground">Data stored locally in your browser</p>
+        {user && (
+          <div className="flex items-center gap-3">
+            {user.photoURL && (
+              <img src={user.photoURL} alt="" className="w-8 h-8 rounded-full shrink-0" />
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium truncate">{user.displayName}</p>
+              <p className="text-xs text-muted-foreground truncate">{user.email}</p>
+            </div>
+            <button
+              onClick={logout}
+              className="p-1.5 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground shrink-0"
+              title="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
     </aside>
   )
