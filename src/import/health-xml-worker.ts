@@ -100,7 +100,7 @@ function parseAttributes(attrString: string): Record<string, string> {
   return attrs
 }
 
-// Streaming parser: accumulates text chunks and extracts complete XML elements
+// State
 let buffer = ''
 let workoutsFound = 0
 let recordsProcessed = 0
@@ -112,13 +112,10 @@ const workoutSourceIds = new Set<string>()
 const activitySummaryBatch: WorkerActivitySummaries['data'] = []
 const dailyAggregates = new Map<string, number>()
 
-function processBuffer(isFinal: boolean) {
-  // Process self-closing Workout elements
-  const workoutRegex = /<Workout\s([^>]*?)\/>/g
-  let match: RegExpExecArray | null
-
-  while ((match = workoutRegex.exec(buffer)) !== null) {
-    const attrs = parseAttributes(match[1])
+// Process a single self-closing XML element like <Tag attr="val"/>
+function processElement(tagName: string, attrString: string) {
+  if (tagName === 'Workout') {
+    const attrs = parseAttributes(attrString)
     const workoutType = attrs.workoutActivityType || ''
     const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
     const startDate = attrs.startDate || ''
@@ -146,51 +143,10 @@ function processBuffer(isFinal: boolean) {
       })
       workoutsFound++
     }
-  }
-
-  // Process non-self-closing Workout elements (opening tag only)
-  const workoutBlockRegex = /<Workout\s([^/][^>]*?)>/g
-  while ((match = workoutBlockRegex.exec(buffer)) !== null) {
-    // Skip if this was actually a self-closing tag
-    if (buffer[match.index + match[0].length - 2] === '/') continue
-
-    const attrs = parseAttributes(match[1])
-    const workoutType = attrs.workoutActivityType || ''
-    const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
-    const startDate = attrs.startDate || ''
-    const endDate = attrs.endDate || ''
-    const duration = parseFloat(attrs.duration || '0')
-    const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
-    const totalDistance = parseFloat(attrs.totalDistance || '0')
-    const sourceName = attrs.sourceName || ''
-    const creationDate = attrs.creationDate || startDate
-
-    const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
-    if (!workoutSourceIds.has(sourceId)) {
-      workoutSourceIds.add(sourceId)
-      workoutBatch.push({
-        sourceId,
-        workoutActivityType: workoutType,
-        activityName,
-        duration: duration / 60,
-        totalEnergyBurned,
-        totalDistance: totalDistance / 1000,
-        sourceName,
-        startDate,
-        endDate,
-        creationDate,
-      })
-      workoutsFound++
-    }
-  }
-
-  // Process Record elements
-  const recordRegex = /<Record\s([^>]*?)\/>/g
-  while ((match = recordRegex.exec(buffer)) !== null) {
-    const attrs = parseAttributes(match[1])
+  } else if (tagName === 'Record') {
+    const attrs = parseAttributes(attrString)
     const recordType = attrs.type as RecordType | undefined
-
-    if (!recordType || !RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) continue
+    if (!recordType || !RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) return
 
     const value = parseFloat(attrs.value || '0')
     const startDate = attrs.startDate || ''
@@ -200,12 +156,8 @@ function processBuffer(isFinal: boolean) {
 
     dailyAggregates.set(key, (dailyAggregates.get(key) ?? 0) + value)
     recordsProcessed++
-  }
-
-  // Process ActivitySummary elements
-  const activitySummaryRegex = /<ActivitySummary\s([^>]*?)\/>/g
-  while ((match = activitySummaryRegex.exec(buffer)) !== null) {
-    const attrs = parseAttributes(match[1])
+  } else if (tagName === 'ActivitySummary') {
+    const attrs = parseAttributes(attrString)
     activitySummaryBatch.push({
       date: attrs.dateComponents || '',
       activeEnergyBurned: parseFloat(attrs.activeEnergyBurned || '0'),
@@ -217,20 +169,94 @@ function processBuffer(isFinal: boolean) {
     })
     activitySummariesFound++
   }
+}
 
-  if (!isFinal) {
-    // Keep the last portion of the buffer in case an element spans chunks.
-    // We keep the last 10KB to be safe for long attribute strings.
-    const keepBytes = 10000
-    if (buffer.length > keepBytes) {
-      // Find the last '<' in the portion we'd discard to avoid splitting a tag
-      const cutPoint = buffer.lastIndexOf('<', buffer.length - keepBytes)
-      if (cutPoint > 0) {
-        buffer = buffer.substring(cutPoint)
-      } else {
-        buffer = buffer.substring(buffer.length - keepBytes)
-      }
+// Scan the buffer for complete self-closing tags, process them,
+// and return the index up to which the buffer has been consumed.
+function scanBuffer(): number {
+  let consumed = 0
+  let i = 0
+
+  while (i < buffer.length) {
+    // Find start of a tag
+    const tagStart = buffer.indexOf('<', i)
+    if (tagStart === -1) {
+      consumed = i
+      break
     }
+
+    // Check if we have enough buffer to see the tag name
+    if (tagStart + 1 >= buffer.length) {
+      consumed = tagStart
+      break
+    }
+
+    const nextChar = buffer[tagStart + 1]
+
+    // Skip closing tags, comments, processing instructions, CDATA, DOCTYPE
+    if (nextChar === '/' || nextChar === '!' || nextChar === '?') {
+      // Find end of this tag
+      const tagEnd = buffer.indexOf('>', tagStart + 1)
+      if (tagEnd === -1) {
+        consumed = tagStart
+        break
+      }
+      i = tagEnd + 1
+      continue
+    }
+
+    // We have an opening tag. Find the end of it.
+    const tagEnd = buffer.indexOf('>', tagStart + 1)
+    if (tagEnd === -1) {
+      // Incomplete tag — stop here, keep from tagStart
+      consumed = tagStart
+      break
+    }
+
+    // Check if self-closing
+    const isSelfClosing = buffer[tagEnd - 1] === '/'
+
+    // Extract tag name
+    const tagContent = buffer.substring(tagStart + 1, tagEnd)
+    const spaceIdx = tagContent.indexOf(' ')
+    let tagName: string
+    let attrString: string
+
+    if (spaceIdx === -1) {
+      tagName = isSelfClosing ? tagContent.substring(0, tagContent.length - 1).trim() : tagContent.trim()
+      attrString = ''
+    } else {
+      tagName = tagContent.substring(0, spaceIdx)
+      attrString = isSelfClosing
+        ? tagContent.substring(spaceIdx + 1, tagContent.length - 1)
+        : tagContent.substring(spaceIdx + 1)
+    }
+
+    if (isSelfClosing) {
+      // Process self-closing elements we care about
+      if (tagName === 'Workout' || tagName === 'Record' || tagName === 'ActivitySummary') {
+        processElement(tagName, attrString)
+      }
+    } else if (tagName === 'Workout') {
+      // Non-self-closing Workout — extract attrs from opening tag
+      processElement('Workout', attrString)
+    }
+
+    i = tagEnd + 1
+  }
+
+  // If we processed everything
+  if (i >= buffer.length) {
+    consumed = buffer.length
+  }
+
+  return consumed
+}
+
+function processChunk() {
+  const consumed = scanBuffer()
+  if (consumed > 0) {
+    buffer = buffer.substring(consumed)
   }
 }
 
@@ -240,9 +266,7 @@ self.onmessage = (e: MessageEvent<WorkerInputMessage>) => {
   try {
     if (msg.type === 'chunk') {
       buffer += msg.text
-
-      // Process what we have so far
-      processBuffer(false)
+      processChunk()
 
       // Report progress
       self.postMessage({
@@ -254,7 +278,7 @@ self.onmessage = (e: MessageEvent<WorkerInputMessage>) => {
       } satisfies WorkerProgress)
     } else if (msg.type === 'done') {
       // Process any remaining buffer
-      processBuffer(true)
+      processChunk()
 
       // Send workouts
       if (workoutBatch.length > 0) {
