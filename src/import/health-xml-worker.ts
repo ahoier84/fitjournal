@@ -201,21 +201,19 @@ class StreamingXmlProcessor {
   }
 
   private extractWorkouts(text: string) {
-    // Use a combined regex that matches:
-    // 1. <Workout .../>          (self-closing)
-    // 2. <Workout ...>           (opening tag)
-    // 3. </Workout>              (closing tag)
-    // 4. <WorkoutStatistics .../> (child stats, only meaningful inside a Workout)
-    const regex = /<(\/?)Workout(?:Statistics)?\s?([^>]*?)(?:\/?)>/g
+    // Single regex that matches exactly the tags we need, using alternation:
+    // 1. </Workout>                         → closing tag
+    // 2. <WorkoutStatistics\s.../>           → stats child element
+    // 3. <Workout\s...> or <Workout\s.../>   → opening or self-closing workout
+    // The \s after tag names prevents matching WorkoutEvent, WorkoutRoute, etc.
+    const regex = /<\/Workout>|<WorkoutStatistics\s([^>]*?)\/>|<Workout\s([^>]*?)(\/?)>/g
     let match: RegExpExecArray | null
 
     while ((match = regex.exec(text)) !== null) {
       const fullMatch = match[0]
-      const isClosing = match[1] === '/'
-      const attrString = match[2]
 
       // </Workout> — close the pending workout
-      if (isClosing && fullMatch.startsWith('</Workout>')) {
+      if (fullMatch === '</Workout>') {
         if (this.pendingWorkout) {
           this.finalizeWorkout(this.pendingWorkout)
           this.pendingWorkout = null
@@ -224,9 +222,9 @@ class StreamingXmlProcessor {
       }
 
       // <WorkoutStatistics .../> — add stats to pending workout
-      if (fullMatch.startsWith('<WorkoutStatistics')) {
-        if (this.pendingWorkout && attrString) {
-          const attrs = parseAttributes(attrString)
+      if (match[1] !== undefined) {
+        if (this.pendingWorkout) {
+          const attrs = parseAttributes(match[1])
           const statType = attrs.type || ''
           const sum = parseFloat(attrs.sum || '0')
 
@@ -245,9 +243,9 @@ class StreamingXmlProcessor {
       }
 
       // <Workout .../> or <Workout ...>
-      if (fullMatch.startsWith('<Workout')) {
-        const isSelfClosing = fullMatch.endsWith('/>')
-        const attrs = parseAttributes(attrString)
+      if (match[2] !== undefined) {
+        const isSelfClosing = match[3] === '/'
+        const attrs = parseAttributes(match[2])
         const workoutType = attrs.workoutActivityType || ''
         const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
         const startDate = attrs.startDate || ''
@@ -259,15 +257,12 @@ class StreamingXmlProcessor {
         const creationDate = attrs.creationDate || startDate
 
         if (isSelfClosing) {
-          // Self-closing: no children possible, finalize immediately
-          // Use date-based duration as fallback
           this.finalizeWorkout({
             workoutType, activityName, startDate, endDate,
             durationAttr, energyBurnedAttr, distanceAttr,
             sourceName, creationDate, statsEnergy: 0, statsDistance: 0,
           })
         } else {
-          // Opening tag: save as pending, collect WorkoutStatistics children
           // If there was a previous pending workout that never got closed, finalize it first
           if (this.pendingWorkout) {
             this.finalizeWorkout(this.pendingWorkout)
