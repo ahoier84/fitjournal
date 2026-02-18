@@ -1,4 +1,4 @@
-import { writeBatch, doc } from 'firebase/firestore'
+import { writeBatch, doc, disableNetwork, enableNetwork } from 'firebase/firestore'
 import { firestore } from '@/lib/firebase'
 import { userCollection, userDoc } from '@/db/database'
 import type { WorkerMessage } from './health-xml-worker'
@@ -33,10 +33,12 @@ export interface ImportResult {
   durationMs: number
 }
 
+const BATCH_SIZE = 200 // Smaller batches for reliability
+
 async function commitBatches<T>(items: T[], writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
-  for (let i = 0; i < items.length; i += 500) {
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batch = writeBatch(firestore)
-    const chunk = items.slice(i, i + 500)
+    const chunk = items.slice(i, i + BATCH_SIZE)
     for (const item of chunk) {
       writeFn(batch, item)
     }
@@ -134,24 +136,29 @@ export async function parseHealthExport(
         case 'workouts': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
-          // Use sourceId as the document ID for natural deduplication —
-          // no need to query existing docs first (which was hanging on large collections)
-          await commitBatches(msg.data, (batch, w) => {
-            const ref = userDoc(uid, 'workouts', w.sourceId)
-            batch.set(ref, {
-              sourceId: w.sourceId,
-              workoutActivityType: w.workoutActivityType,
-              activityName: w.activityName,
-              duration: w.duration,
-              totalEnergyBurned: w.totalEnergyBurned,
-              totalDistance: w.totalDistance,
-              sourceName: w.sourceName,
-              startDate: parseHealthDate(w.startDate),
-              endDate: parseHealthDate(w.endDate),
-              creationDate: parseHealthDate(w.creationDate),
-              importedAt: new Date(),
-            }, { merge: true })
-          })
+          // Disable network so writes go to local cache only (instant).
+          // This prevents batch.commit() from waiting for server sync.
+          await disableNetwork(firestore)
+          try {
+            await commitBatches(msg.data, (batch, w) => {
+              const ref = userDoc(uid, 'workouts', w.sourceId)
+              batch.set(ref, {
+                sourceId: w.sourceId,
+                workoutActivityType: w.workoutActivityType,
+                activityName: w.activityName,
+                duration: w.duration,
+                totalEnergyBurned: w.totalEnergyBurned,
+                totalDistance: w.totalDistance,
+                sourceName: w.sourceName,
+                startDate: parseHealthDate(w.startDate),
+                endDate: parseHealthDate(w.endDate),
+                creationDate: parseHealthDate(w.creationDate),
+                importedAt: new Date(),
+              }, { merge: true })
+            })
+          } finally {
+            await enableNetwork(firestore)
+          }
           totalWorkouts += msg.data.length
           break
         }
@@ -167,11 +174,16 @@ export async function parseHealthExport(
             updatedAt: new Date(),
           }))
 
-          await commitBatches(metrics, (batch, metric) => {
-            const docId = `${metric.date}_${metric.metricType}`
-            const ref = userDoc(uid, 'dailyMetrics', docId)
-            batch.set(ref, metric, { merge: true })
-          })
+          await disableNetwork(firestore)
+          try {
+            await commitBatches(metrics, (batch, metric) => {
+              const docId = `${metric.date}_${metric.metricType}`
+              const ref = userDoc(uid, 'dailyMetrics', docId)
+              batch.set(ref, metric, { merge: true })
+            })
+          } finally {
+            await enableNetwork(firestore)
+          }
           totalRecords += metrics.length
           break
         }
@@ -188,10 +200,15 @@ export async function parseHealthExport(
             importedAt: new Date(),
           }))
 
-          await commitBatches(summaries, (batch, summary) => {
-            const ref = userDoc(uid, 'activitySummaries', summary.date)
-            batch.set(ref, summary, { merge: true })
-          })
+          await disableNetwork(firestore)
+          try {
+            await commitBatches(summaries, (batch, summary) => {
+              const ref = userDoc(uid, 'activitySummaries', summary.date)
+              batch.set(ref, summary, { merge: true })
+            })
+          } finally {
+            await enableNetwork(firestore)
+          }
           totalSummaries += summaries.length
           break
         }
