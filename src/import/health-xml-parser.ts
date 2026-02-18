@@ -1,4 +1,5 @@
-import { setDoc, doc } from 'firebase/firestore'
+import { writeBatch, doc, setDoc } from 'firebase/firestore'
+import { firestore } from '@/lib/firebase'
 import { userCollection, userDoc } from '@/db/database'
 import type { WorkerMessage } from './health-xml-worker'
 
@@ -32,18 +33,17 @@ export interface ImportResult {
   durationMs: number
 }
 
-// Write documents using individual setDoc calls.
-// With Firestore offline persistence, setDoc resolves immediately
-// (writes to local IndexedDB cache, syncs to server in background).
-// Process in small parallel groups to avoid overwhelming the browser.
-async function writeDocsConcurrently<T>(
-  items: T[],
-  writeFn: (item: T) => Promise<void>,
-  concurrency = 50,
-) {
-  for (let i = 0; i < items.length; i += concurrency) {
-    const group = items.slice(i, i + concurrency)
-    await Promise.all(group.map(writeFn))
+// Write documents in batches of 500 (Firestore max).
+// Without offline persistence, batch.commit() goes straight to the server
+// and resolves when the server confirms — no IndexedDB bottleneck.
+async function commitBatches<T>(items: T[], writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
+  for (let i = 0; i < items.length; i += 500) {
+    const batch = writeBatch(firestore)
+    const chunk = items.slice(i, i + 500)
+    for (const item of chunk) {
+      writeFn(batch, item)
+    }
+    await batch.commit()
   }
 }
 
@@ -67,8 +67,6 @@ export async function parseHealthExport(
     worker.postMessage({ type: 'init', totalSize: file.size, isZip })
 
     // Read the file in 4MB chunks and transfer each to the worker.
-    // The worker uses fflate streaming Unzip to decompress on the fly
-    // and a streaming XML parser — nothing is ever fully in memory.
     const CHUNK_SIZE = 4 * 1024 * 1024 // 4 MB
     ;(async () => {
       try {
@@ -79,14 +77,12 @@ export async function parseHealthExport(
           const chunkBuffer = await slice.arrayBuffer()
           worker.postMessage(
             { type: 'chunk', buffer: chunkBuffer },
-            [chunkBuffer] // transfer (zero-copy)
+            [chunkBuffer]
           )
           offset = end
           onProgress({ bytesRead: offset, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'reading' })
-          // Yield to let the worker process and avoid message queue flooding
           await new Promise(r => setTimeout(r, 0))
         }
-        // Signal that all chunks have been sent
         worker.postMessage({ type: 'done' })
         onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'parsing' })
       } catch (err) {
@@ -100,7 +96,6 @@ export async function parseHealthExport(
     let totalSummaries = 0
 
     // Queue worker messages so we process them one at a time
-    // (otherwise async Firestore writes overlap and cause issues)
     const messageQueue: WorkerMessage[] = []
     let processing = false
 
@@ -137,9 +132,9 @@ export async function parseHealthExport(
         case 'workouts': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
-          await writeDocsConcurrently(msg.data, async (w) => {
+          await commitBatches(msg.data, (batch, w) => {
             const ref = userDoc(uid, 'workouts', w.sourceId)
-            await setDoc(ref, {
+            batch.set(ref, {
               sourceId: w.sourceId,
               workoutActivityType: w.workoutActivityType,
               activityName: w.activityName,
@@ -151,7 +146,7 @@ export async function parseHealthExport(
               endDate: parseHealthDate(w.endDate),
               creationDate: parseHealthDate(w.creationDate),
               importedAt: new Date(),
-            }, { merge: true })
+            })
           })
           totalWorkouts += msg.data.length
           break
@@ -160,10 +155,10 @@ export async function parseHealthExport(
         case 'dailyMetrics': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: totalWorkouts, recordsProcessed: msg.data.length, phase: 'saving' })
 
-          await writeDocsConcurrently(msg.data, async (m) => {
+          await commitBatches(msg.data, (batch, m) => {
             const docId = `${m.date}_${m.metricType}`
             const ref = userDoc(uid, 'dailyMetrics', docId)
-            await setDoc(ref, {
+            batch.set(ref, {
               date: m.date,
               metricType: m.metricType,
               value: m.value,
@@ -176,9 +171,9 @@ export async function parseHealthExport(
         }
 
         case 'activitySummaries': {
-          await writeDocsConcurrently(msg.data, async (s) => {
+          await commitBatches(msg.data, (batch, s) => {
             const ref = userDoc(uid, 'activitySummaries', s.date)
-            await setDoc(ref, {
+            batch.set(ref, {
               date: s.date,
               activeEnergyBurned: s.activeEnergyBurned,
               activeEnergyBurnedGoal: s.activeEnergyBurnedGoal,
@@ -198,7 +193,6 @@ export async function parseHealthExport(
 
           const durationMs = performance.now() - startTime
 
-          // Record the import
           const importRef = doc(userCollection(uid, 'importRecords'))
           await setDoc(importRef, {
             filename: file.name,
