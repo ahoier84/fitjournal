@@ -81,8 +81,30 @@ export async function parseHealthExport(
     let totalRecords = 0
     let totalSummaries = 0
 
-    worker.onmessage = async (e: MessageEvent<WorkerMessage>) => {
-      const msg = e.data
+    // Queue worker messages so we process them one at a time
+    // (otherwise async Firestore writes overlap and cause issues)
+    const messageQueue: WorkerMessage[] = []
+    let processing = false
+
+    async function processQueue() {
+      if (processing) return
+      processing = true
+
+      while (messageQueue.length > 0) {
+        const msg = messageQueue.shift()!
+        try {
+          await handleMessage(msg)
+        } catch (err) {
+          worker.terminate()
+          reject(err instanceof Error ? err : new Error('Unknown error during import'))
+          return
+        }
+      }
+
+      processing = false
+    }
+
+    async function handleMessage(msg: WorkerMessage) {
       switch (msg.type) {
         case 'progress':
           onProgress({
@@ -122,6 +144,8 @@ export async function parseHealthExport(
         }
 
         case 'dailyMetrics': {
+          onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: totalWorkouts, recordsProcessed: msg.data.length, phase: 'saving' })
+
           const metrics = msg.data.map(m => ({
             date: m.date,
             metricType: m.metricType,
@@ -192,6 +216,11 @@ export async function parseHealthExport(
           reject(new Error(msg.message))
           break
       }
+    }
+
+    worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+      messageQueue.push(e.data)
+      processQueue()
     }
 
     worker.onerror = (err) => {

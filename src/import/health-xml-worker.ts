@@ -276,6 +276,7 @@ let processor: StreamingXmlProcessor | null = null
 let fileIsZip = false
 let unzipper: Unzip | null = null
 let xmlFileFound = false
+let finalized = false
 const decoder = new TextDecoder()
 
 type InitMessage = { type: 'init'; totalSize: number; isZip: boolean }
@@ -290,6 +291,7 @@ self.onmessage = (e: MessageEvent<IncomingMessage>) => {
     if (msg.type === 'init') {
       fileIsZip = msg.isZip
       xmlFileFound = false
+      finalized = false
       processor = new StreamingXmlProcessor(msg.totalSize)
 
       if (fileIsZip) {
@@ -324,7 +326,8 @@ self.onmessage = (e: MessageEvent<IncomingMessage>) => {
               processor!.processChunk(text)
             }
 
-            if (final) {
+            if (final && !finalized) {
+              finalized = true
               processor!.finalize()
             }
           }
@@ -359,11 +362,21 @@ self.onmessage = (e: MessageEvent<IncomingMessage>) => {
             type: 'error',
             message: 'Could not find export.xml in the zip file',
           } satisfies WorkerError)
+          return
         }
-        // finalize() is called in the file.ondata handler when final=true
+
+        // Fallback: if fflate didn't call ondata with final=true,
+        // finalize here to ensure results are always sent
+        if (!finalized && processor) {
+          finalized = true
+          processor.finalize()
+        }
       } else if (processor) {
         // Raw XML — finalize
-        processor.finalize()
+        if (!finalized) {
+          finalized = true
+          processor.finalize()
+        }
       }
     }
   } catch (err) {
