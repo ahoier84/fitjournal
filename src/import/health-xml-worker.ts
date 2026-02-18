@@ -245,25 +245,62 @@ function processXmlText(text: string) {
   } satisfies WorkerComplete)
 }
 
-self.onmessage = async (e: MessageEvent<{ type: 'file'; buffer: ArrayBuffer; isZip: boolean }>) => {
-  try {
-    const { buffer, isZip } = e.data
-    let xmlText: string
+// Chunked file reception: main thread sends init → chunk* → done
+let fileIsZip = false
+let chunks: Uint8Array[] = []
+let receivedBytes = 0
 
-    if (isZip) {
-      const unzipped = unzipSync(new Uint8Array(buffer))
-      const xmlFile = Object.entries(unzipped).find(([name]) =>
-        name.endsWith('export.xml') || name.includes('apple_health_export/export.xml')
-      )
-      if (!xmlFile) {
-        throw new Error('Could not find export.xml in the zip file')
-      }
-      xmlText = strFromU8(xmlFile[1])
-    } else {
-      xmlText = new TextDecoder().decode(buffer)
+type InitMessage = { type: 'init'; totalSize: number; isZip: boolean }
+type ChunkMessage = { type: 'chunk'; buffer: ArrayBuffer }
+type DoneMessage = { type: 'done' }
+type IncomingMessage = InitMessage | ChunkMessage | DoneMessage
+
+self.onmessage = (e: MessageEvent<IncomingMessage>) => {
+  try {
+    const msg = e.data
+
+    if (msg.type === 'init') {
+      fileIsZip = msg.isZip
+      chunks = []
+      receivedBytes = 0
+      return
     }
 
-    processXmlText(xmlText)
+    if (msg.type === 'chunk') {
+      const chunk = new Uint8Array(msg.buffer)
+      chunks.push(chunk)
+      receivedBytes += chunk.byteLength
+      return
+    }
+
+    if (msg.type === 'done') {
+      // Combine all chunks into a single Uint8Array
+      const combined = new Uint8Array(receivedBytes)
+      let offset = 0
+      for (const chunk of chunks) {
+        combined.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+      // Free chunk references
+      chunks = []
+
+      let xmlText: string
+
+      if (fileIsZip) {
+        const unzipped = unzipSync(combined)
+        const xmlFile = Object.entries(unzipped).find(([name]) =>
+          name.endsWith('export.xml') || name.includes('apple_health_export/export.xml')
+        )
+        if (!xmlFile) {
+          throw new Error('Could not find export.xml in the zip file')
+        }
+        xmlText = strFromU8(xmlFile[1])
+      } else {
+        xmlText = new TextDecoder().decode(combined)
+      }
+
+      processXmlText(xmlText)
+    }
   } catch (err) {
     self.postMessage({
       type: 'error',

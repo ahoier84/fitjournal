@@ -38,18 +38,42 @@ export async function parseHealthExport(
 
   onProgress({ bytesRead: 0, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'reading' })
 
-  // Transfer the file as an ArrayBuffer to the worker, which handles
-  // both zip extraction and XML parsing in its own memory space.
-  // We read in the main thread and transfer to avoid copies.
-  const arrayBuffer = await file.arrayBuffer()
-
-  onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'parsing' })
-
   return new Promise<ImportResult>((resolve, reject) => {
     const worker = new Worker(
       new URL('./health-xml-worker.ts', import.meta.url),
       { type: 'module' }
     )
+
+    // Tell the worker how big the file is and whether it's a zip
+    const isZip = file.name.endsWith('.zip')
+    worker.postMessage({ type: 'init', totalSize: file.size, isZip })
+
+    // Read the file in 2MB chunks and transfer each to the worker.
+    // This keeps main-thread memory usage low (~2MB) while the worker
+    // accumulates the full file in its own memory space.
+    const CHUNK_SIZE = 2 * 1024 * 1024 // 2 MB
+    ;(async () => {
+      try {
+        let offset = 0
+        while (offset < file.size) {
+          const end = Math.min(offset + CHUNK_SIZE, file.size)
+          const slice = file.slice(offset, end)
+          const chunkBuffer = await slice.arrayBuffer()
+          worker.postMessage(
+            { type: 'chunk', buffer: chunkBuffer },
+            [chunkBuffer] // transfer (zero-copy)
+          )
+          offset = end
+          onProgress({ bytesRead: offset, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'reading' })
+        }
+        // Signal that all chunks have been sent
+        worker.postMessage({ type: 'done' })
+        onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'parsing' })
+      } catch (err) {
+        worker.terminate()
+        reject(err instanceof Error ? err : new Error('Failed to read file'))
+      }
+    })()
 
     let totalWorkouts = 0
     let totalRecords = 0
@@ -172,11 +196,5 @@ export async function parseHealthExport(
       worker.terminate()
       reject(new Error(err.message))
     }
-
-    // Transfer the ArrayBuffer to the worker (zero-copy)
-    worker.postMessage(
-      { type: 'file', buffer: arrayBuffer, isZip: file.name.endsWith('.zip') },
-      [arrayBuffer]
-    )
   })
 }
