@@ -1,4 +1,5 @@
 import { WORKOUT_TYPE_LABELS, RECORD_TYPES_OF_INTEREST, RECORD_TYPE_TO_METRIC, RECORD_TYPE_UNITS, type RecordType } from './health-types'
+import { unzipSync, strFromU8 } from 'fflate'
 
 export interface WorkerProgress {
   type: 'progress'
@@ -64,22 +65,6 @@ export interface WorkerError {
 
 export type WorkerMessage = WorkerProgress | WorkerWorkouts | WorkerDailyMetrics | WorkerActivitySummaries | WorkerComplete | WorkerError
 
-// Message types sent TO the worker
-export interface WorkerChunkMessage {
-  type: 'chunk'
-  text: string
-  bytesRead: number
-  totalBytes: number
-}
-
-export interface WorkerDoneMessage {
-  type: 'done'
-  totalBytes: number
-}
-
-export type WorkerInputMessage = WorkerChunkMessage | WorkerDoneMessage
-
-// Simple hash for deduplication
 function simpleHash(str: string): string {
   let hash = 0
   for (let i = 0; i < str.length; i++) {
@@ -100,228 +85,189 @@ function parseAttributes(attrString: string): Record<string, string> {
   return attrs
 }
 
-// State
-let buffer = ''
-let workoutsFound = 0
-let recordsProcessed = 0
-let activitySummariesFound = 0
-const startTime = performance.now()
+// Process the XML text by scanning for complete self-closing tags.
+// We process the text in passes by tag type to keep things simple.
+// The text is already fully in memory in the worker thread.
+function processXmlText(text: string) {
+  const startTime = performance.now()
+  const totalBytes = text.length
+  let workoutsFound = 0
+  let recordsProcessed = 0
+  let activitySummariesFound = 0
 
-const workoutBatch: WorkerWorkouts['data'] = []
-const workoutSourceIds = new Set<string>()
-const activitySummaryBatch: WorkerActivitySummaries['data'] = []
-const dailyAggregates = new Map<string, number>()
+  const workoutBatch: WorkerWorkouts['data'] = []
+  const workoutSourceIds = new Set<string>()
+  const activitySummaryBatch: WorkerActivitySummaries['data'] = []
+  const dailyAggregates = new Map<string, number>()
 
-// Process a single self-closing XML element like <Tag attr="val"/>
-function processElement(tagName: string, attrString: string) {
-  if (tagName === 'Workout') {
-    const attrs = parseAttributes(attrString)
-    const workoutType = attrs.workoutActivityType || ''
-    const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
-    const startDate = attrs.startDate || ''
-    const endDate = attrs.endDate || ''
-    const duration = parseFloat(attrs.duration || '0')
-    const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
-    const totalDistance = parseFloat(attrs.totalDistance || '0')
-    const sourceName = attrs.sourceName || ''
-    const creationDate = attrs.creationDate || startDate
-
-    const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
-    if (!workoutSourceIds.has(sourceId)) {
-      workoutSourceIds.add(sourceId)
-      workoutBatch.push({
-        sourceId,
-        workoutActivityType: workoutType,
-        activityName,
-        duration: duration / 60,
-        totalEnergyBurned,
-        totalDistance: totalDistance / 1000,
-        sourceName,
-        startDate,
-        endDate,
-        creationDate,
-      })
-      workoutsFound++
-    }
-  } else if (tagName === 'Record') {
-    const attrs = parseAttributes(attrString)
-    const recordType = attrs.type as RecordType | undefined
-    if (!recordType || !RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) return
-
-    const value = parseFloat(attrs.value || '0')
-    const startDate = attrs.startDate || ''
-    const dateStr = startDate.substring(0, 10)
-    const metricType = RECORD_TYPE_TO_METRIC[recordType as RecordType]
-    const key = `${dateStr}|${metricType}`
-
-    dailyAggregates.set(key, (dailyAggregates.get(key) ?? 0) + value)
-    recordsProcessed++
-  } else if (tagName === 'ActivitySummary') {
-    const attrs = parseAttributes(attrString)
-    activitySummaryBatch.push({
-      date: attrs.dateComponents || '',
-      activeEnergyBurned: parseFloat(attrs.activeEnergyBurned || '0'),
-      activeEnergyBurnedGoal: parseFloat(attrs.activeEnergyBurnedGoal || '0'),
-      appleExerciseTime: parseFloat(attrs.appleExerciseTime || '0'),
-      appleExerciseTimeGoal: parseFloat(attrs.appleExerciseTimeGoal || '0'),
-      appleStandHours: parseFloat(attrs.appleStandHours || '0'),
-      appleStandHoursGoal: parseFloat(attrs.appleStandHoursGoal || '0'),
-    })
-    activitySummariesFound++
-  }
-}
-
-// Scan the buffer for complete self-closing tags, process them,
-// and return the index up to which the buffer has been consumed.
-function scanBuffer(): number {
-  let consumed = 0
+  // Scan through the text character by character looking for tags we care about
   let i = 0
+  let lastProgress = 0
 
-  while (i < buffer.length) {
-    // Find start of a tag
-    const tagStart = buffer.indexOf('<', i)
-    if (tagStart === -1) {
-      consumed = i
-      break
-    }
+  while (i < text.length) {
+    // Find next '<'
+    const tagStart = text.indexOf('<', i)
+    if (tagStart === -1) break
 
-    // Check if we have enough buffer to see the tag name
-    if (tagStart + 1 >= buffer.length) {
-      consumed = tagStart
-      break
-    }
+    // Quick check: skip if not a tag we care about
+    const nextChar = text.charCodeAt(tagStart + 1)
 
-    const nextChar = buffer[tagStart + 1]
-
-    // Skip closing tags, comments, processing instructions, CDATA, DOCTYPE
-    if (nextChar === '/' || nextChar === '!' || nextChar === '?') {
-      // Find end of this tag
-      const tagEnd = buffer.indexOf('>', tagStart + 1)
-      if (tagEnd === -1) {
-        consumed = tagStart
-        break
-      }
-      i = tagEnd + 1
+    // 'W' = 87, 'R' = 82, 'A' = 65
+    if (nextChar !== 87 && nextChar !== 82 && nextChar !== 65) {
+      // Skip to end of this tag
+      const end = text.indexOf('>', tagStart + 1)
+      i = end === -1 ? text.length : end + 1
       continue
     }
 
-    // We have an opening tag. Find the end of it.
-    const tagEnd = buffer.indexOf('>', tagStart + 1)
-    if (tagEnd === -1) {
-      // Incomplete tag — stop here, keep from tagStart
-      consumed = tagStart
-      break
-    }
+    // Find end of tag
+    const tagEnd = text.indexOf('>', tagStart + 1)
+    if (tagEnd === -1) break
 
     // Check if self-closing
-    const isSelfClosing = buffer[tagEnd - 1] === '/'
+    const isSelfClosing = text.charCodeAt(tagEnd - 1) === 47 // '/'
 
-    // Extract tag name
-    const tagContent = buffer.substring(tagStart + 1, tagEnd)
-    const spaceIdx = tagContent.indexOf(' ')
-    let tagName: string
-    let attrString: string
+    // Extract tag name (up to first space)
+    let nameEnd = tagStart + 1
+    while (nameEnd < tagEnd && text.charCodeAt(nameEnd) !== 32) nameEnd++ // space
+    const tagName = text.substring(tagStart + 1, nameEnd)
 
-    if (spaceIdx === -1) {
-      tagName = isSelfClosing ? tagContent.substring(0, tagContent.length - 1).trim() : tagContent.trim()
-      attrString = ''
-    } else {
-      tagName = tagContent.substring(0, spaceIdx)
-      attrString = isSelfClosing
-        ? tagContent.substring(spaceIdx + 1, tagContent.length - 1)
-        : tagContent.substring(spaceIdx + 1)
-    }
+    if (tagName === 'Workout') {
+      const attrEnd = isSelfClosing ? tagEnd - 1 : tagEnd
+      const attrString = text.substring(nameEnd + 1, attrEnd)
+      const attrs = parseAttributes(attrString)
 
-    if (isSelfClosing) {
-      // Process self-closing elements we care about
-      if (tagName === 'Workout' || tagName === 'Record' || tagName === 'ActivitySummary') {
-        processElement(tagName, attrString)
+      const workoutType = attrs.workoutActivityType || ''
+      const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
+      const startDate = attrs.startDate || ''
+      const endDate = attrs.endDate || ''
+      const duration = parseFloat(attrs.duration || '0')
+      const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
+      const totalDistance = parseFloat(attrs.totalDistance || '0')
+      const sourceName = attrs.sourceName || ''
+      const creationDate = attrs.creationDate || startDate
+
+      const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
+      if (!workoutSourceIds.has(sourceId)) {
+        workoutSourceIds.add(sourceId)
+        workoutBatch.push({
+          sourceId,
+          workoutActivityType: workoutType,
+          activityName,
+          duration: duration / 60,
+          totalEnergyBurned,
+          totalDistance: totalDistance / 1000,
+          sourceName,
+          startDate,
+          endDate,
+          creationDate,
+        })
+        workoutsFound++
       }
-    } else if (tagName === 'Workout') {
-      // Non-self-closing Workout — extract attrs from opening tag
-      processElement('Workout', attrString)
+    } else if (tagName === 'Record' && isSelfClosing) {
+      const attrString = text.substring(nameEnd + 1, tagEnd - 1)
+      const attrs = parseAttributes(attrString)
+      const recordType = attrs.type as RecordType | undefined
+
+      if (recordType && RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) {
+        const value = parseFloat(attrs.value || '0')
+        const startDate = attrs.startDate || ''
+        const dateStr = startDate.substring(0, 10)
+        const metricType = RECORD_TYPE_TO_METRIC[recordType as RecordType]
+        const key = `${dateStr}|${metricType}`
+        dailyAggregates.set(key, (dailyAggregates.get(key) ?? 0) + value)
+        recordsProcessed++
+      }
+    } else if (tagName === 'ActivitySummary' && isSelfClosing) {
+      const attrString = text.substring(nameEnd + 1, tagEnd - 1)
+      const attrs = parseAttributes(attrString)
+      activitySummaryBatch.push({
+        date: attrs.dateComponents || '',
+        activeEnergyBurned: parseFloat(attrs.activeEnergyBurned || '0'),
+        activeEnergyBurnedGoal: parseFloat(attrs.activeEnergyBurnedGoal || '0'),
+        appleExerciseTime: parseFloat(attrs.appleExerciseTime || '0'),
+        appleExerciseTimeGoal: parseFloat(attrs.appleExerciseTimeGoal || '0'),
+        appleStandHours: parseFloat(attrs.appleStandHours || '0'),
+        appleStandHoursGoal: parseFloat(attrs.appleStandHoursGoal || '0'),
+      })
+      activitySummariesFound++
     }
 
     i = tagEnd + 1
-  }
 
-  // If we processed everything
-  if (i >= buffer.length) {
-    consumed = buffer.length
-  }
-
-  return consumed
-}
-
-function processChunk() {
-  const consumed = scanBuffer()
-  if (consumed > 0) {
-    buffer = buffer.substring(consumed)
-  }
-}
-
-self.onmessage = (e: MessageEvent<WorkerInputMessage>) => {
-  const msg = e.data
-
-  try {
-    if (msg.type === 'chunk') {
-      buffer += msg.text
-      processChunk()
-
-      // Report progress
+    // Send progress every ~5MB
+    if (i - lastProgress > 5_000_000) {
+      lastProgress = i
       self.postMessage({
         type: 'progress',
-        bytesRead: msg.bytesRead,
-        totalBytes: msg.totalBytes,
+        bytesRead: i,
+        totalBytes,
         workoutsFound,
         recordsProcessed,
       } satisfies WorkerProgress)
-    } else if (msg.type === 'done') {
-      // Process any remaining buffer
-      processChunk()
-
-      // Send workouts
-      if (workoutBatch.length > 0) {
-        self.postMessage({ type: 'workouts', data: workoutBatch } satisfies WorkerWorkouts)
-      }
-
-      // Convert daily aggregates to metric records
-      const dailyMetrics: WorkerDailyMetrics['data'] = []
-      for (const [key, value] of dailyAggregates) {
-        const [date, metricType] = key.split('|')
-        const recordType = Object.entries(RECORD_TYPE_TO_METRIC).find(([, v]) => v === metricType)?.[0] as RecordType | undefined
-        dailyMetrics.push({
-          date,
-          metricType,
-          value,
-          unit: recordType ? RECORD_TYPE_UNITS[recordType] : '',
-        })
-      }
-
-      if (dailyMetrics.length > 0) {
-        self.postMessage({ type: 'dailyMetrics', data: dailyMetrics } satisfies WorkerDailyMetrics)
-      }
-
-      // Send activity summaries
-      if (activitySummaryBatch.length > 0) {
-        self.postMessage({ type: 'activitySummaries', data: activitySummaryBatch } satisfies WorkerActivitySummaries)
-      }
-
-      const durationMs = performance.now() - startTime
-      self.postMessage({
-        type: 'complete',
-        stats: {
-          workoutsFound,
-          recordsProcessed,
-          activitySummaries: activitySummariesFound,
-          durationMs,
-        },
-      } satisfies WorkerComplete)
     }
+  }
+
+  // Send results
+  if (workoutBatch.length > 0) {
+    self.postMessage({ type: 'workouts', data: workoutBatch } satisfies WorkerWorkouts)
+  }
+
+  const dailyMetrics: WorkerDailyMetrics['data'] = []
+  for (const [key, value] of dailyAggregates) {
+    const [date, metricType] = key.split('|')
+    const recordType = Object.entries(RECORD_TYPE_TO_METRIC).find(([, v]) => v === metricType)?.[0] as RecordType | undefined
+    dailyMetrics.push({
+      date,
+      metricType,
+      value,
+      unit: recordType ? RECORD_TYPE_UNITS[recordType] : '',
+    })
+  }
+
+  if (dailyMetrics.length > 0) {
+    self.postMessage({ type: 'dailyMetrics', data: dailyMetrics } satisfies WorkerDailyMetrics)
+  }
+
+  if (activitySummaryBatch.length > 0) {
+    self.postMessage({ type: 'activitySummaries', data: activitySummaryBatch } satisfies WorkerActivitySummaries)
+  }
+
+  const durationMs = performance.now() - startTime
+  self.postMessage({
+    type: 'complete',
+    stats: {
+      workoutsFound,
+      recordsProcessed,
+      activitySummaries: activitySummariesFound,
+      durationMs,
+    },
+  } satisfies WorkerComplete)
+}
+
+self.onmessage = async (e: MessageEvent<{ type: 'file'; buffer: ArrayBuffer; isZip: boolean }>) => {
+  try {
+    const { buffer, isZip } = e.data
+    let xmlText: string
+
+    if (isZip) {
+      const unzipped = unzipSync(new Uint8Array(buffer))
+      const xmlFile = Object.entries(unzipped).find(([name]) =>
+        name.endsWith('export.xml') || name.includes('apple_health_export/export.xml')
+      )
+      if (!xmlFile) {
+        throw new Error('Could not find export.xml in the zip file')
+      }
+      xmlText = strFromU8(xmlFile[1])
+    } else {
+      xmlText = new TextDecoder().decode(buffer)
+    }
+
+    processXmlText(xmlText)
   } catch (err) {
     self.postMessage({
       type: 'error',
-      message: err instanceof Error ? err.message : 'Unknown parsing error',
+      message: err instanceof Error ? err.message : 'Unknown error',
     } satisfies WorkerError)
   }
 }
