@@ -1,5 +1,4 @@
-import { writeBatch, doc, disableNetwork, enableNetwork } from 'firebase/firestore'
-import { firestore } from '@/lib/firebase'
+import { setDoc, doc } from 'firebase/firestore'
 import { userCollection, userDoc } from '@/db/database'
 import type { WorkerMessage } from './health-xml-worker'
 
@@ -33,16 +32,18 @@ export interface ImportResult {
   durationMs: number
 }
 
-const BATCH_SIZE = 200 // Smaller batches for reliability
-
-async function commitBatches<T>(items: T[], writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
-  for (let i = 0; i < items.length; i += BATCH_SIZE) {
-    const batch = writeBatch(firestore)
-    const chunk = items.slice(i, i + BATCH_SIZE)
-    for (const item of chunk) {
-      writeFn(batch, item)
-    }
-    await batch.commit()
+// Write documents using individual setDoc calls.
+// With Firestore offline persistence, setDoc resolves immediately
+// (writes to local IndexedDB cache, syncs to server in background).
+// Process in small parallel groups to avoid overwhelming the browser.
+async function writeDocsConcurrently<T>(
+  items: T[],
+  writeFn: (item: T) => Promise<void>,
+  concurrency = 50,
+) {
+  for (let i = 0; i < items.length; i += concurrency) {
+    const group = items.slice(i, i + concurrency)
+    await Promise.all(group.map(writeFn))
   }
 }
 
@@ -136,29 +137,22 @@ export async function parseHealthExport(
         case 'workouts': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
-          // Disable network so writes go to local cache only (instant).
-          // This prevents batch.commit() from waiting for server sync.
-          await disableNetwork(firestore)
-          try {
-            await commitBatches(msg.data, (batch, w) => {
-              const ref = userDoc(uid, 'workouts', w.sourceId)
-              batch.set(ref, {
-                sourceId: w.sourceId,
-                workoutActivityType: w.workoutActivityType,
-                activityName: w.activityName,
-                duration: w.duration,
-                totalEnergyBurned: w.totalEnergyBurned,
-                totalDistance: w.totalDistance,
-                sourceName: w.sourceName,
-                startDate: parseHealthDate(w.startDate),
-                endDate: parseHealthDate(w.endDate),
-                creationDate: parseHealthDate(w.creationDate),
-                importedAt: new Date(),
-              }, { merge: true })
-            })
-          } finally {
-            await enableNetwork(firestore)
-          }
+          await writeDocsConcurrently(msg.data, async (w) => {
+            const ref = userDoc(uid, 'workouts', w.sourceId)
+            await setDoc(ref, {
+              sourceId: w.sourceId,
+              workoutActivityType: w.workoutActivityType,
+              activityName: w.activityName,
+              duration: w.duration,
+              totalEnergyBurned: w.totalEnergyBurned,
+              totalDistance: w.totalDistance,
+              sourceName: w.sourceName,
+              startDate: parseHealthDate(w.startDate),
+              endDate: parseHealthDate(w.endDate),
+              creationDate: parseHealthDate(w.creationDate),
+              importedAt: new Date(),
+            }, { merge: true })
+          })
           totalWorkouts += msg.data.length
           break
         }
@@ -166,50 +160,36 @@ export async function parseHealthExport(
         case 'dailyMetrics': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: totalWorkouts, recordsProcessed: msg.data.length, phase: 'saving' })
 
-          const metrics = msg.data.map(m => ({
-            date: m.date,
-            metricType: m.metricType,
-            value: m.value,
-            unit: m.unit,
-            updatedAt: new Date(),
-          }))
-
-          await disableNetwork(firestore)
-          try {
-            await commitBatches(metrics, (batch, metric) => {
-              const docId = `${metric.date}_${metric.metricType}`
-              const ref = userDoc(uid, 'dailyMetrics', docId)
-              batch.set(ref, metric, { merge: true })
-            })
-          } finally {
-            await enableNetwork(firestore)
-          }
-          totalRecords += metrics.length
+          await writeDocsConcurrently(msg.data, async (m) => {
+            const docId = `${m.date}_${m.metricType}`
+            const ref = userDoc(uid, 'dailyMetrics', docId)
+            await setDoc(ref, {
+              date: m.date,
+              metricType: m.metricType,
+              value: m.value,
+              unit: m.unit,
+              updatedAt: new Date(),
+            }, { merge: true })
+          })
+          totalRecords += msg.data.length
           break
         }
 
         case 'activitySummaries': {
-          const summaries = msg.data.map(s => ({
-            date: s.date,
-            activeEnergyBurned: s.activeEnergyBurned,
-            activeEnergyBurnedGoal: s.activeEnergyBurnedGoal,
-            appleExerciseTime: s.appleExerciseTime,
-            appleExerciseTimeGoal: s.appleExerciseTimeGoal,
-            appleStandHours: s.appleStandHours,
-            appleStandHoursGoal: s.appleStandHoursGoal,
-            importedAt: new Date(),
-          }))
-
-          await disableNetwork(firestore)
-          try {
-            await commitBatches(summaries, (batch, summary) => {
-              const ref = userDoc(uid, 'activitySummaries', summary.date)
-              batch.set(ref, summary, { merge: true })
-            })
-          } finally {
-            await enableNetwork(firestore)
-          }
-          totalSummaries += summaries.length
+          await writeDocsConcurrently(msg.data, async (s) => {
+            const ref = userDoc(uid, 'activitySummaries', s.date)
+            await setDoc(ref, {
+              date: s.date,
+              activeEnergyBurned: s.activeEnergyBurned,
+              activeEnergyBurnedGoal: s.activeEnergyBurnedGoal,
+              appleExerciseTime: s.appleExerciseTime,
+              appleExerciseTimeGoal: s.appleExerciseTimeGoal,
+              appleStandHours: s.appleStandHours,
+              appleStandHoursGoal: s.appleStandHoursGoal,
+              importedAt: new Date(),
+            }, { merge: true })
+          })
+          totalSummaries += msg.data.length
           break
         }
 
@@ -218,9 +198,9 @@ export async function parseHealthExport(
 
           const durationMs = performance.now() - startTime
 
+          // Record the import
           const importRef = doc(userCollection(uid, 'importRecords'))
-          const batch = writeBatch(firestore)
-          batch.set(importRef, {
+          await setDoc(importRef, {
             filename: file.name,
             importedAt: new Date(),
             workoutsImported: totalWorkouts,
@@ -228,7 +208,6 @@ export async function parseHealthExport(
             activitySummariesImported: totalSummaries,
             durationMs,
           })
-          await batch.commit()
 
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: totalWorkouts, recordsProcessed: totalRecords, phase: 'complete' })
 
