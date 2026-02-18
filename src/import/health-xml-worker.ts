@@ -89,12 +89,31 @@ function parseAttributes(attrString: string): Record<string, string> {
 // Processes XML text chunk-by-chunk, extracting complete tags as they appear.
 // Keeps a small leftover buffer (~1KB) for tags split across chunk boundaries.
 
+// Pending workout being assembled from opening tag + WorkoutStatistics children
+interface PendingWorkout {
+  workoutType: string
+  activityName: string
+  startDate: string
+  endDate: string
+  durationAttr: number       // duration from Workout attribute (may be 0 on iOS 16+)
+  energyBurnedAttr: number   // totalEnergyBurned from Workout attribute (may be 0 on iOS 16+)
+  distanceAttr: number       // totalDistance from Workout attribute (may be 0 on iOS 16+)
+  sourceName: string
+  creationDate: string
+  // Values from WorkoutStatistics children (iOS 16+)
+  statsEnergy: number
+  statsDistance: number
+}
+
 class StreamingXmlProcessor {
   private leftover = ''
   private workoutBatch: WorkerWorkouts['data'] = []
   private workoutSourceIds = new Set<string>()
   private activitySummaryBatch: WorkerActivitySummaries['data'] = []
   private dailyAggregates = new Map<string, number>()
+
+  // Track the current open Workout element so we can collect its WorkoutStatistics children
+  private pendingWorkout: PendingWorkout | null = null
 
   workoutsFound = 0
   recordsProcessed = 0
@@ -133,36 +152,120 @@ class StreamingXmlProcessor {
     this.extractActivitySummaries(complete)
   }
 
-  private extractWorkouts(text: string) {
-    // Match both self-closing and opening Workout tags
-    const regex = /<Workout\s([^>]*?)(?:\/?>)/g
-    let match: RegExpExecArray | null
-    while ((match = regex.exec(text)) !== null) {
-      const isSelfClosing = match[0].endsWith('/>')
-      const isOpenTag = !isSelfClosing
+  private computeDurationMinutes(startDate: string, endDate: string): number {
+    const start = new Date(startDate).getTime()
+    const end = new Date(endDate).getTime()
+    if (isNaN(start) || isNaN(end)) return 0
+    return (end - start) / 60000
+  }
 
-      // For opening tags that aren't self-closing, we still extract attributes from the opening tag
-      if (isOpenTag || isSelfClosing) {
-        const attrs = parseAttributes(match[1])
+  private finalizeWorkout(pw: PendingWorkout) {
+    // Use WorkoutStatistics values if available, fall back to Workout attributes
+    const totalEnergyBurned = pw.statsEnergy > 0 ? pw.statsEnergy : pw.energyBurnedAttr
+    const totalDistance = pw.statsDistance > 0 ? pw.statsDistance : pw.distanceAttr
+
+    // Duration: prefer the attribute (usually correct), compute from dates as fallback
+    let durationMinutes = pw.durationAttr / 60
+    if (durationMinutes <= 0) {
+      durationMinutes = this.computeDurationMinutes(pw.startDate, pw.endDate)
+    }
+
+    const sourceId = simpleHash(`${pw.workoutType}|${pw.startDate}|${pw.endDate}|${pw.sourceName}|${pw.durationAttr}`)
+    if (!this.workoutSourceIds.has(sourceId)) {
+      this.workoutSourceIds.add(sourceId)
+      this.workoutBatch.push({
+        sourceId,
+        workoutActivityType: pw.workoutType,
+        activityName: pw.activityName,
+        duration: durationMinutes,
+        totalEnergyBurned,
+        totalDistance: totalDistance / 1000, // convert m → km
+        sourceName: pw.sourceName,
+        startDate: pw.startDate,
+        endDate: pw.endDate,
+        creationDate: pw.creationDate,
+      })
+      this.workoutsFound++
+    }
+  }
+
+  private extractWorkouts(text: string) {
+    // Use a combined regex that matches:
+    // 1. <Workout .../>          (self-closing)
+    // 2. <Workout ...>           (opening tag)
+    // 3. </Workout>              (closing tag)
+    // 4. <WorkoutStatistics .../> (child stats, only meaningful inside a Workout)
+    const regex = /<(\/?)Workout(?:Statistics)?\s?([^>]*?)(?:\/?)>/g
+    let match: RegExpExecArray | null
+
+    while ((match = regex.exec(text)) !== null) {
+      const fullMatch = match[0]
+      const isClosing = match[1] === '/'
+      const attrString = match[2]
+
+      // </Workout> — close the pending workout
+      if (isClosing && fullMatch.startsWith('</Workout>')) {
+        if (this.pendingWorkout) {
+          this.finalizeWorkout(this.pendingWorkout)
+          this.pendingWorkout = null
+        }
+        continue
+      }
+
+      // <WorkoutStatistics .../> — add stats to pending workout
+      if (fullMatch.startsWith('<WorkoutStatistics')) {
+        if (this.pendingWorkout && attrString) {
+          const attrs = parseAttributes(attrString)
+          const statType = attrs.type || ''
+          const sum = parseFloat(attrs.sum || '0')
+
+          if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned' ||
+              statType === 'HKQuantityTypeIdentifierBasalEnergyBurned') {
+            this.pendingWorkout.statsEnergy += sum
+          } else if (
+            statType === 'HKQuantityTypeIdentifierDistanceWalkingRunning' ||
+            statType === 'HKQuantityTypeIdentifierDistanceCycling' ||
+            statType === 'HKQuantityTypeIdentifierDistanceSwimming'
+          ) {
+            this.pendingWorkout.statsDistance += sum
+          }
+        }
+        continue
+      }
+
+      // <Workout .../> or <Workout ...>
+      if (fullMatch.startsWith('<Workout')) {
+        const isSelfClosing = fullMatch.endsWith('/>')
+        const attrs = parseAttributes(attrString)
         const workoutType = attrs.workoutActivityType || ''
         const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
         const startDate = attrs.startDate || ''
         const endDate = attrs.endDate || ''
-        const duration = parseFloat(attrs.duration || '0')
-        const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
-        const totalDistance = parseFloat(attrs.totalDistance || '0')
+        const durationAttr = parseFloat(attrs.duration || '0')
+        const energyBurnedAttr = parseFloat(attrs.totalEnergyBurned || '0')
+        const distanceAttr = parseFloat(attrs.totalDistance || '0')
         const sourceName = attrs.sourceName || ''
         const creationDate = attrs.creationDate || startDate
-        const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
-        if (!this.workoutSourceIds.has(sourceId)) {
-          this.workoutSourceIds.add(sourceId)
-          this.workoutBatch.push({
-            sourceId, workoutActivityType: workoutType, activityName,
-            duration: duration / 60, totalEnergyBurned,
-            totalDistance: totalDistance / 1000, sourceName,
-            startDate, endDate, creationDate,
+
+        if (isSelfClosing) {
+          // Self-closing: no children possible, finalize immediately
+          // Use date-based duration as fallback
+          this.finalizeWorkout({
+            workoutType, activityName, startDate, endDate,
+            durationAttr, energyBurnedAttr, distanceAttr,
+            sourceName, creationDate, statsEnergy: 0, statsDistance: 0,
           })
-          this.workoutsFound++
+        } else {
+          // Opening tag: save as pending, collect WorkoutStatistics children
+          // If there was a previous pending workout that never got closed, finalize it first
+          if (this.pendingWorkout) {
+            this.finalizeWorkout(this.pendingWorkout)
+          }
+          this.pendingWorkout = {
+            workoutType, activityName, startDate, endDate,
+            durationAttr, energyBurnedAttr, distanceAttr,
+            sourceName, creationDate, statsEnergy: 0, statsDistance: 0,
+          }
         }
       }
     }
@@ -232,6 +335,12 @@ class StreamingXmlProcessor {
       this.extractRecords(this.leftover)
       this.extractActivitySummaries(this.leftover)
       this.leftover = ''
+    }
+
+    // Finalize any pending workout that never got a closing tag
+    if (this.pendingWorkout) {
+      this.finalizeWorkout(this.pendingWorkout)
+      this.pendingWorkout = null
     }
 
     // Send all results
