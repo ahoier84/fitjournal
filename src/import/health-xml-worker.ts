@@ -152,9 +152,20 @@ class StreamingXmlProcessor {
     this.extractActivitySummaries(complete)
   }
 
+  // Parse Apple Health date strings like "2024-03-15 08:00:00 -0500"
+  // Standard Date constructor may fail on the space between date and time
+  private parseHealthDate(dateStr: string): number {
+    if (!dateStr) return NaN
+    // Replace first space with 'T' to make ISO-compatible
+    const iso = dateStr.replace(' ', 'T')
+    const t = new Date(iso).getTime()
+    if (!isNaN(t)) return t
+    return new Date(dateStr).getTime()
+  }
+
   private computeDurationMinutes(startDate: string, endDate: string): number {
-    const start = new Date(startDate).getTime()
-    const end = new Date(endDate).getTime()
+    const start = this.parseHealthDate(startDate)
+    const end = this.parseHealthDate(endDate)
     if (isNaN(start) || isNaN(end)) return 0
     return (end - start) / 60000
   }

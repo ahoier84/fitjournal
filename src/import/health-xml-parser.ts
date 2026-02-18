@@ -3,6 +3,21 @@ import { firestore } from '@/lib/firebase'
 import { userCollection, userDoc } from '@/db/database'
 import type { WorkerMessage } from './health-xml-worker'
 
+// Parse Apple Health date strings like "2024-03-15 08:00:00 -0500"
+// Standard Date constructor may fail on the space between date and time
+function parseHealthDate(dateStr: string): Date {
+  if (!dateStr) return new Date()
+  // Replace first space with 'T' to make ISO-compatible: "2024-03-15T08:00:00 -0500"
+  const iso = dateStr.replace(' ', 'T')
+  const d = new Date(iso)
+  if (!isNaN(d.getTime())) return d
+  // Fallback: try original string
+  const d2 = new Date(dateStr)
+  if (!isNaN(d2.getTime())) return d2
+  // Last resort: return current date
+  return new Date()
+}
+
 export interface ImportProgress {
   bytesRead: number
   totalBytes: number
@@ -133,9 +148,9 @@ export async function parseHealthExport(
               totalEnergyBurned: w.totalEnergyBurned,
               totalDistance: w.totalDistance,
               sourceName: w.sourceName,
-              startDate: new Date(w.startDate),
-              endDate: new Date(w.endDate),
-              creationDate: new Date(w.creationDate),
+              startDate: parseHealthDate(w.startDate),
+              endDate: parseHealthDate(w.endDate),
+              creationDate: parseHealthDate(w.creationDate),
               importedAt: new Date(),
             })
           })
