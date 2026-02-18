@@ -18,110 +18,7 @@ export interface ImportResult {
   durationMs: number
 }
 
-// Stream the file as text chunks using ReadableStream
-// This avoids loading the entire file into memory at once
-async function streamFileToWorker(file: File, worker: Worker): Promise<void> {
-  const totalBytes = file.size
-
-  // For zip files, we need a different approach — use streaming decompression
-  if (file.name.endsWith('.zip')) {
-    // Import fflate dynamically only when needed for zip
-    const { Unzip, UnzipInflate } = await import('fflate')
-
-    return new Promise<void>((resolve, reject) => {
-      let bytesRead = 0
-      let foundXml = false
-
-      const unzipper = new Unzip((stream) => {
-        // Look for export.xml in the zip entries
-        if (stream.name.endsWith('export.xml') || stream.name.includes('apple_health_export/export.xml')) {
-          foundXml = true
-          stream.ondata = (err, data, final) => {
-            if (err) {
-              reject(err)
-              return
-            }
-            if (data && data.length > 0) {
-              // Decode the Uint8Array chunk to string
-              const text = new TextDecoder().decode(data)
-              bytesRead += data.length
-              worker.postMessage({
-                type: 'chunk',
-                text,
-                bytesRead,
-                totalBytes,
-              })
-            }
-            if (final) {
-              worker.postMessage({ type: 'done', totalBytes })
-              resolve()
-            }
-          }
-          stream.start()
-        }
-      })
-      unzipper.register(UnzipInflate)
-
-      // Read the zip file in chunks
-      const reader = file.stream().getReader()
-      const pump = async () => {
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-              unzipper.push(new Uint8Array(0), true)
-              if (!foundXml) {
-                reject(new Error('Could not find export.xml in the zip file'))
-              }
-              break
-            }
-            unzipper.push(value)
-          }
-        } catch (err) {
-          reject(err)
-        }
-      }
-      pump()
-    })
-  }
-
-  // For XML files, stream directly using ReadableStream
-  const stream = file.stream()
-  const reader = stream.getReader()
-  const decoder = new TextDecoder()
-  let bytesRead = 0
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    const text = decoder.decode(value, { stream: true })
-    bytesRead += value.length
-
-    worker.postMessage({
-      type: 'chunk',
-      text,
-      bytesRead,
-      totalBytes,
-    })
-  }
-
-  // Flush any remaining decoder state
-  const finalText = decoder.decode()
-  if (finalText) {
-    worker.postMessage({
-      type: 'chunk',
-      text: finalText,
-      bytesRead,
-      totalBytes,
-    })
-  }
-
-  worker.postMessage({ type: 'done', totalBytes })
-}
-
 async function commitBatches<T>(items: T[], writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
-  // Firestore batch limit is 500 operations
   for (let i = 0; i < items.length; i += 500) {
     const batch = writeBatch(firestore)
     const chunk = items.slice(i, i + 500)
@@ -132,6 +29,118 @@ async function commitBatches<T>(items: T[], writeFn: (batch: ReturnType<typeof w
   }
 }
 
+// Read an XML file in slices and send text chunks to the worker.
+// For ZIP files, we extract the XML first using fflate, but we
+// process the decompressed content in manageable slices.
+async function streamFileToWorker(file: File, worker: Worker): Promise<void> {
+  const totalBytes = file.size
+
+  if (file.name.endsWith('.zip')) {
+    // For zip: decompress in streaming fashion, but use backpressure
+    // by processing the zip in fixed-size slices of the raw file
+    const { Unzip, UnzipInflate } = await import('fflate')
+
+    return new Promise<void>((resolve, reject) => {
+      let decompressedBytes = 0
+      let foundXml = false
+      let finished = false
+      const decoder = new TextDecoder()
+
+      const unzipper = new Unzip((stream) => {
+        if (stream.name.endsWith('export.xml') || stream.name.includes('apple_health_export/export.xml')) {
+          foundXml = true
+          stream.ondata = (err, data, final) => {
+            if (err) { reject(err); return }
+            if (data && data.length > 0) {
+              const text = decoder.decode(data, { stream: !final })
+              decompressedBytes += data.length
+              worker.postMessage({
+                type: 'chunk',
+                text,
+                bytesRead: decompressedBytes,
+                totalBytes: totalBytes * 4, // estimate: decompressed ~4x larger
+              })
+            }
+            if (final) {
+              finished = true
+            }
+          }
+          stream.start()
+        }
+      })
+      unzipper.register(UnzipInflate)
+
+      // Read zip in 512KB slices to avoid memory spikes
+      const SLICE_SIZE = 512 * 1024
+      let offset = 0
+
+      const readNextSlice = async () => {
+        try {
+          while (offset < file.size) {
+            const end = Math.min(offset + SLICE_SIZE, file.size)
+            const slice = file.slice(offset, end)
+            const arrayBuffer = await slice.arrayBuffer()
+            const isFinal = end >= file.size
+            unzipper.push(new Uint8Array(arrayBuffer), isFinal)
+            offset = end
+
+            // Yield to event loop periodically to prevent blocking
+            if (offset % (SLICE_SIZE * 4) === 0) {
+              await new Promise(r => setTimeout(r, 0))
+            }
+          }
+
+          if (!foundXml) {
+            reject(new Error('Could not find export.xml in the zip file'))
+          } else if (finished) {
+            worker.postMessage({ type: 'done', totalBytes: decompressedBytes })
+            resolve()
+          } else {
+            // Wait a bit for the last decompression callback
+            setTimeout(() => {
+              worker.postMessage({ type: 'done', totalBytes: decompressedBytes })
+              resolve()
+            }, 100)
+          }
+        } catch (err) {
+          reject(err)
+        }
+      }
+
+      readNextSlice()
+    })
+  }
+
+  // For XML files, read in 1MB slices
+  const SLICE_SIZE = 1024 * 1024
+  const decoder = new TextDecoder()
+  let offset = 0
+
+  while (offset < file.size) {
+    const end = Math.min(offset + SLICE_SIZE, file.size)
+    const slice = file.slice(offset, end)
+    const arrayBuffer = await slice.arrayBuffer()
+    const isFinal = end >= file.size
+    const text = decoder.decode(new Uint8Array(arrayBuffer), { stream: !isFinal })
+
+    worker.postMessage({
+      type: 'chunk',
+      text,
+      bytesRead: end,
+      totalBytes,
+    })
+
+    offset = end
+
+    // Yield to event loop
+    if (offset % (SLICE_SIZE * 4) === 0) {
+      await new Promise(r => setTimeout(r, 0))
+    }
+  }
+
+  worker.postMessage({ type: 'done', totalBytes })
+}
+
 export async function parseHealthExport(
   uid: string,
   file: File,
@@ -139,10 +148,8 @@ export async function parseHealthExport(
 ): Promise<ImportResult> {
   const startTime = performance.now()
 
-  // Phase 1: Start streaming
   onProgress({ bytesRead: 0, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'reading' })
 
-  // Phase 2: Parse in Web Worker with streaming chunks
   return new Promise<ImportResult>((resolve, reject) => {
     const worker = new Worker(
       new URL('./health-xml-worker.ts', import.meta.url),
@@ -159,7 +166,7 @@ export async function parseHealthExport(
         case 'progress':
           onProgress({
             bytesRead: msg.bytesRead,
-            totalBytes: file.size,
+            totalBytes: msg.totalBytes,
             workoutsFound: msg.workoutsFound,
             recordsProcessed: msg.recordsProcessed,
             phase: 'parsing',
@@ -169,7 +176,6 @@ export async function parseHealthExport(
         case 'workouts': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
-          // Check for existing sourceIds to avoid duplicates
           const existingSnap = await getDocs(query(userCollection(uid, 'workouts')))
           const existingIds = new Set(existingSnap.docs.map(d => d.data().sourceId as string))
 
@@ -204,7 +210,6 @@ export async function parseHealthExport(
             updatedAt: new Date(),
           }))
 
-          // Use composite doc ID for upsert: date_metricType
           await commitBatches(metrics, (batch, metric) => {
             const docId = `${metric.date}_${metric.metricType}`
             const ref = userDoc(uid, 'dailyMetrics', docId)
@@ -226,7 +231,6 @@ export async function parseHealthExport(
             importedAt: new Date(),
           }))
 
-          // Use date as doc ID for upsert
           await commitBatches(summaries, (batch, summary) => {
             const ref = userDoc(uid, 'activitySummaries', summary.date)
             batch.set(ref, summary, { merge: true })
@@ -240,7 +244,6 @@ export async function parseHealthExport(
 
           const durationMs = performance.now() - startTime
 
-          // Save import record
           const importRef = doc(userCollection(uid, 'importRecords'))
           const batch = writeBatch(firestore)
           batch.set(importRef, {
@@ -276,7 +279,6 @@ export async function parseHealthExport(
       reject(new Error(err.message))
     }
 
-    // Start streaming the file to the worker
     streamFileToWorker(file, worker).catch(err => {
       worker.terminate()
       reject(err)
