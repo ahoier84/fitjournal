@@ -48,10 +48,10 @@ export async function parseHealthExport(
     const isZip = file.name.endsWith('.zip')
     worker.postMessage({ type: 'init', totalSize: file.size, isZip })
 
-    // Read the file in 2MB chunks and transfer each to the worker.
-    // This keeps main-thread memory usage low (~2MB) while the worker
-    // accumulates the full file in its own memory space.
-    const CHUNK_SIZE = 2 * 1024 * 1024 // 2 MB
+    // Read the file in 4MB chunks and transfer each to the worker.
+    // The worker uses fflate streaming Unzip to decompress on the fly
+    // and a streaming XML parser — nothing is ever fully in memory.
+    const CHUNK_SIZE = 4 * 1024 * 1024 // 4 MB
     ;(async () => {
       try {
         let offset = 0
@@ -65,6 +65,8 @@ export async function parseHealthExport(
           )
           offset = end
           onProgress({ bytesRead: offset, totalBytes: file.size, workoutsFound: 0, recordsProcessed: 0, phase: 'reading' })
+          // Yield to let the worker process and avoid message queue flooding
+          await new Promise(r => setTimeout(r, 0))
         }
         // Signal that all chunks have been sent
         worker.postMessage({ type: 'done' })
