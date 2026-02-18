@@ -33,24 +33,27 @@ export interface ImportResult {
   durationMs: number
 }
 
-// Write documents in batches of 500 (Firestore max).
-// Each batch has a 30-second timeout to detect hangs.
+// Write documents in small batches with delays between them to avoid
+// triggering Firestore's rate limiter / exponential backoff.
+const BATCH_SIZE = 100 // Small batches to stay under rate limits
+const BATCH_DELAY_MS = 500 // 500ms pause between batches
+
 async function commitBatches<T>(items: T[], label: string, writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
-  const totalBatches = Math.ceil(items.length / 500)
-  for (let i = 0; i < items.length; i += 500) {
-    const batchNum = Math.floor(i / 500) + 1
+  const totalBatches = Math.ceil(items.length / BATCH_SIZE)
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1
     const batch = writeBatch(firestore)
-    const chunk = items.slice(i, i + 500)
+    const chunk = items.slice(i, i + BATCH_SIZE)
     for (const item of chunk) {
       writeFn(batch, item)
     }
     console.log(`[Import] ${label}: committing batch ${batchNum}/${totalBatches} (${chunk.length} docs)...`)
-    const commitPromise = batch.commit()
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} batch ${batchNum}/${totalBatches} timed out after 30s`)), 30000)
-    )
-    await Promise.race([commitPromise, timeoutPromise])
+    await batch.commit()
     console.log(`[Import] ${label}: batch ${batchNum}/${totalBatches} done`)
+    // Pause between batches to avoid Firestore rate limiting
+    if (i + BATCH_SIZE < items.length) {
+      await new Promise(r => setTimeout(r, BATCH_DELAY_MS))
+    }
   }
 }
 
