@@ -1,4 +1,4 @@
-import { writeBatch, doc, getDocs, query } from 'firebase/firestore'
+import { writeBatch, doc } from 'firebase/firestore'
 import { firestore } from '@/lib/firebase'
 import { userCollection, userDoc } from '@/db/database'
 import type { WorkerMessage } from './health-xml-worker'
@@ -134,12 +134,10 @@ export async function parseHealthExport(
         case 'workouts': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
-          const existingSnap = await getDocs(query(userCollection(uid, 'workouts')))
-          const existingIds = new Set(existingSnap.docs.map(d => d.data().sourceId as string))
-          const newWorkouts = msg.data.filter(w => !existingIds.has(w.sourceId))
-
-          await commitBatches(newWorkouts, (batch, w) => {
-            const ref = doc(userCollection(uid, 'workouts'))
+          // Use sourceId as the document ID for natural deduplication —
+          // no need to query existing docs first (which was hanging on large collections)
+          await commitBatches(msg.data, (batch, w) => {
+            const ref = userDoc(uid, 'workouts', w.sourceId)
             batch.set(ref, {
               sourceId: w.sourceId,
               workoutActivityType: w.workoutActivityType,
@@ -152,9 +150,9 @@ export async function parseHealthExport(
               endDate: parseHealthDate(w.endDate),
               creationDate: parseHealthDate(w.creationDate),
               importedAt: new Date(),
-            })
+            }, { merge: true })
           })
-          totalWorkouts += newWorkouts.length
+          totalWorkouts += msg.data.length
           break
         }
 
