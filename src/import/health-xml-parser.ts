@@ -1,6 +1,4 @@
-import { writeBatch, doc, setDoc } from 'firebase/firestore'
-import { firestore } from '@/lib/firebase'
-import { userCollection, userDoc } from '@/db/database'
+import { auth } from '@/lib/firebase'
 import type { WorkerMessage } from './health-xml-worker'
 
 // Parse Apple Health date strings like "2024-03-15 08:00:00 -0500"
@@ -33,24 +31,90 @@ export interface ImportResult {
   durationMs: number
 }
 
-// Write documents in small batches with delays between them to avoid
-// triggering Firestore's rate limiter / exponential backoff.
-const BATCH_SIZE = 100 // Small batches to stay under rate limits
-const BATCH_DELAY_MS = 500 // 500ms pause between batches
+// ---- Firestore REST API helpers ----
+// Bypass the Firestore SDK entirely to avoid its internal exponential backoff
+// state that persists across import attempts within the same browser session.
 
-async function commitBatches<T>(items: T[], label: string, writeFn: (batch: ReturnType<typeof writeBatch>, item: T) => void) {
+const PROJECT_ID = import.meta.env.VITE_FIREBASE_PROJECT_ID
+const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`
+
+async function getAuthToken(): Promise<string> {
+  const user = auth.currentUser
+  if (!user) throw new Error('Not authenticated')
+  return user.getIdToken()
+}
+
+// Convert a JS value to a Firestore REST API value object
+function toFirestoreValue(val: unknown): Record<string, unknown> {
+  if (val === null || val === undefined) return { nullValue: null }
+  if (typeof val === 'string') return { stringValue: val }
+  if (typeof val === 'boolean') return { booleanValue: val }
+  if (typeof val === 'number') {
+    if (Number.isInteger(val)) return { integerValue: String(val) }
+    return { doubleValue: val }
+  }
+  if (val instanceof Date) return { timestampValue: val.toISOString() }
+  if (Array.isArray(val)) return { arrayValue: { values: val.map(toFirestoreValue) } }
+  if (typeof val === 'object') {
+    const fields: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      fields[k] = toFirestoreValue(v)
+    }
+    return { mapValue: { fields } }
+  }
+  return { stringValue: String(val) }
+}
+
+// Build a Firestore document body from a plain object
+function buildDocBody(data: Record<string, unknown>): { fields: Record<string, unknown> } {
+  const fields: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(data)) {
+    fields[k] = toFirestoreValue(v)
+  }
+  return { fields }
+}
+
+const BATCH_SIZE = 100
+const BATCH_DELAY_MS = 500
+
+// Write documents using Firestore REST API batch commit
+async function commitBatchesRest(
+  uid: string,
+  items: Array<{ collection: string; docId: string; data: Record<string, unknown> }>,
+  label: string,
+) {
+  const token = await getAuthToken()
   const totalBatches = Math.ceil(items.length / BATCH_SIZE)
+
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batchNum = Math.floor(i / BATCH_SIZE) + 1
-    const batch = writeBatch(firestore)
     const chunk = items.slice(i, i + BATCH_SIZE)
-    for (const item of chunk) {
-      writeFn(batch, item)
-    }
+
+    const writes = chunk.map(item => ({
+      update: {
+        name: `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/${item.collection}/${item.docId}`,
+        fields: buildDocBody(item.data).fields,
+      },
+    }))
+
     console.log(`[Import] ${label}: committing batch ${batchNum}/${totalBatches} (${chunk.length} docs)...`)
-    await batch.commit()
+
+    const resp = await fetch(`${FIRESTORE_BASE}:batchWrite`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ writes }),
+    })
+
+    if (!resp.ok) {
+      const text = await resp.text()
+      throw new Error(`Firestore batchWrite failed (${resp.status}): ${text}`)
+    }
+
     console.log(`[Import] ${label}: batch ${batchNum}/${totalBatches} done`)
-    // Pause between batches to avoid Firestore rate limiting
+
     if (i + BATCH_SIZE < items.length) {
       await new Promise(r => setTimeout(r, BATCH_DELAY_MS))
     }
@@ -143,9 +207,10 @@ export async function parseHealthExport(
           console.log(`[Import] Received ${msg.data.length} workouts from worker, starting save...`)
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
-          await commitBatches(msg.data, 'Workouts', (batch, w) => {
-            const ref = userDoc(uid, 'workouts', w.sourceId)
-            batch.set(ref, {
+          const workoutDocs = msg.data.map(w => ({
+            collection: 'workouts',
+            docId: w.sourceId,
+            data: {
               sourceId: w.sourceId,
               workoutActivityType: w.workoutActivityType,
               activityName: w.activityName,
@@ -157,8 +222,9 @@ export async function parseHealthExport(
               endDate: parseHealthDate(w.endDate),
               creationDate: parseHealthDate(w.creationDate),
               importedAt: new Date(),
-            })
-          })
+            },
+          }))
+          await commitBatchesRest(uid, workoutDocs, 'Workouts')
           totalWorkouts += msg.data.length
           break
         }
@@ -166,25 +232,27 @@ export async function parseHealthExport(
         case 'dailyMetrics': {
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: totalWorkouts, recordsProcessed: msg.data.length, phase: 'saving' })
 
-          await commitBatches(msg.data, 'DailyMetrics', (batch, m) => {
-            const docId = `${m.date}_${m.metricType}`
-            const ref = userDoc(uid, 'dailyMetrics', docId)
-            batch.set(ref, {
+          const metricDocs = msg.data.map(m => ({
+            collection: 'dailyMetrics',
+            docId: `${m.date}_${m.metricType}`,
+            data: {
               date: m.date,
               metricType: m.metricType,
               value: m.value,
               unit: m.unit,
               updatedAt: new Date(),
-            }, { merge: true })
-          })
+            },
+          }))
+          await commitBatchesRest(uid, metricDocs, 'DailyMetrics')
           totalRecords += msg.data.length
           break
         }
 
         case 'activitySummaries': {
-          await commitBatches(msg.data, 'ActivitySummaries', (batch, s) => {
-            const ref = userDoc(uid, 'activitySummaries', s.date)
-            batch.set(ref, {
+          const summaryDocs = msg.data.map(s => ({
+            collection: 'activitySummaries',
+            docId: s.date,
+            data: {
               date: s.date,
               activeEnergyBurned: s.activeEnergyBurned,
               activeEnergyBurnedGoal: s.activeEnergyBurnedGoal,
@@ -193,8 +261,9 @@ export async function parseHealthExport(
               appleStandHours: s.appleStandHours,
               appleStandHoursGoal: s.appleStandHoursGoal,
               importedAt: new Date(),
-            }, { merge: true })
-          })
+            },
+          }))
+          await commitBatchesRest(uid, summaryDocs, 'ActivitySummaries')
           totalSummaries += msg.data.length
           break
         }
@@ -204,15 +273,20 @@ export async function parseHealthExport(
 
           const durationMs = performance.now() - startTime
 
-          const importRef = doc(userCollection(uid, 'importRecords'))
-          await setDoc(importRef, {
-            filename: file.name,
-            importedAt: new Date(),
-            workoutsImported: totalWorkouts,
-            recordsImported: totalRecords,
-            activitySummariesImported: totalSummaries,
-            durationMs,
-          })
+          // Save import record via REST too
+          const importDocId = `import_${Date.now()}`
+          await commitBatchesRest(uid, [{
+            collection: 'importRecords',
+            docId: importDocId,
+            data: {
+              filename: file.name,
+              importedAt: new Date(),
+              workoutsImported: totalWorkouts,
+              recordsImported: totalRecords,
+              activitySummariesImported: totalSummaries,
+              durationMs,
+            },
+          }], 'ImportRecord')
 
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: totalWorkouts, recordsProcessed: totalRecords, phase: 'complete' })
 
