@@ -96,13 +96,16 @@ interface PendingWorkout {
   startDate: string
   endDate: string
   durationAttr: number       // duration from Workout attribute (may be 0 on iOS 16+)
+  durationUnit: string       // unit for durationAttr (e.g. 'min' or 's')
   energyBurnedAttr: number   // totalEnergyBurned from Workout attribute (may be 0 on iOS 16+)
   distanceAttr: number       // totalDistance from Workout attribute (may be 0 on iOS 16+)
+  distanceUnit: string       // unit for distanceAttr (e.g. 'km' or 'mi')
   sourceName: string
   creationDate: string
   // Values from WorkoutStatistics children (iOS 16+)
   statsEnergy: number
   statsDistance: number
+  statsDistanceUnit: string  // unit from WorkoutStatistics distance element
 }
 
 class StreamingXmlProcessor {
@@ -174,10 +177,25 @@ class StreamingXmlProcessor {
     // Use WorkoutStatistics values if available, fall back to Workout attributes
     const totalEnergyBurned = pw.statsEnergy > 0 ? pw.statsEnergy : pw.energyBurnedAttr
     const totalDistance = pw.statsDistance > 0 ? pw.statsDistance : pw.distanceAttr
+    // Distance unit: WorkoutStatistics report in km, Workout attributes also in km
+    // (Apple Health exports use the unit attribute — both are typically km)
+    // No conversion needed — store as-is in km
+    const distanceKm = pw.statsDistanceUnit === 'km' || pw.distanceUnit === 'km'
+      ? totalDistance
+      : totalDistance / 1000 // fallback: assume meters if unit not specified
 
-    // Duration: prefer the attribute (usually correct), compute from dates as fallback
-    let durationMinutes = pw.durationAttr / 60
-    if (durationMinutes <= 0) {
+    // Duration: prefer the attribute, convert based on unit.
+    // Apple Health durationUnit is typically "min" (minutes) — divide by 60 only if seconds.
+    let durationMinutes: number
+    if (pw.durationAttr > 0) {
+      if (pw.durationUnit === 'min') {
+        durationMinutes = pw.durationAttr
+      } else {
+        // Assume seconds if no unit or unrecognized unit
+        durationMinutes = pw.durationAttr / 60
+      }
+    } else {
+      // Fallback: compute from start/end dates
       durationMinutes = this.computeDurationMinutes(pw.startDate, pw.endDate)
     }
 
@@ -190,7 +208,7 @@ class StreamingXmlProcessor {
         activityName: pw.activityName,
         duration: durationMinutes,
         totalEnergyBurned,
-        totalDistance: totalDistance / 1000, // convert m → km
+        totalDistance: distanceKm,
         sourceName: pw.sourceName,
         startDate: pw.startDate,
         endDate: pw.endDate,
@@ -228,15 +246,22 @@ class StreamingXmlProcessor {
           const statType = attrs.type || ''
           const sum = parseFloat(attrs.sum || '0')
 
-          if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned' ||
-              statType === 'HKQuantityTypeIdentifierBasalEnergyBurned') {
+          // Only count active energy — basal (resting) energy should NOT be
+          // included in workout calories
+          if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned') {
             this.pendingWorkout.statsEnergy += sum
           } else if (
             statType === 'HKQuantityTypeIdentifierDistanceWalkingRunning' ||
             statType === 'HKQuantityTypeIdentifierDistanceCycling' ||
             statType === 'HKQuantityTypeIdentifierDistanceSwimming'
           ) {
-            this.pendingWorkout.statsDistance += sum
+            // Use the largest distance stat rather than summing — a workout
+            // shouldn't have multiple distance types, but if it does we want
+            // the primary one, not an inflated total
+            if (sum > this.pendingWorkout.statsDistance) {
+              this.pendingWorkout.statsDistance = sum
+              this.pendingWorkout.statsDistanceUnit = attrs.unit || ''
+            }
           }
         }
         continue
@@ -251,16 +276,18 @@ class StreamingXmlProcessor {
         const startDate = attrs.startDate || ''
         const endDate = attrs.endDate || ''
         const durationAttr = parseFloat(attrs.duration || '0')
+        const durationUnit = (attrs.durationUnit || '').toLowerCase()
         const energyBurnedAttr = parseFloat(attrs.totalEnergyBurned || '0')
         const distanceAttr = parseFloat(attrs.totalDistance || '0')
+        const distanceUnit = (attrs.totalDistanceUnit || '').toLowerCase()
         const sourceName = attrs.sourceName || ''
         const creationDate = attrs.creationDate || startDate
 
         if (isSelfClosing) {
           this.finalizeWorkout({
             workoutType, activityName, startDate, endDate,
-            durationAttr, energyBurnedAttr, distanceAttr,
-            sourceName, creationDate, statsEnergy: 0, statsDistance: 0,
+            durationAttr, durationUnit, energyBurnedAttr, distanceAttr, distanceUnit,
+            sourceName, creationDate, statsEnergy: 0, statsDistance: 0, statsDistanceUnit: '',
           })
         } else {
           // If there was a previous pending workout that never got closed, finalize it first
@@ -269,8 +296,8 @@ class StreamingXmlProcessor {
           }
           this.pendingWorkout = {
             workoutType, activityName, startDate, endDate,
-            durationAttr, energyBurnedAttr, distanceAttr,
-            sourceName, creationDate, statsEnergy: 0, statsDistance: 0,
+            durationAttr, durationUnit, energyBurnedAttr, distanceAttr, distanceUnit,
+            sourceName, creationDate, statsEnergy: 0, statsDistance: 0, statsDistanceUnit: '',
           }
         }
       }
