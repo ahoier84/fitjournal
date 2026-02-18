@@ -85,9 +85,6 @@ function parseAttributes(attrString: string): Record<string, string> {
   return attrs
 }
 
-// Process the XML text by scanning for complete self-closing tags.
-// We process the text in passes by tag type to keep things simple.
-// The text is already fully in memory in the worker thread.
 function processXmlText(text: string) {
   const startTime = performance.now()
   const totalBytes = text.length
@@ -100,115 +97,128 @@ function processXmlText(text: string) {
   const activitySummaryBatch: WorkerActivitySummaries['data'] = []
   const dailyAggregates = new Map<string, number>()
 
-  // Scan through the text character by character looking for tags we care about
-  let i = 0
-  let lastProgress = 0
+  // Pass 1: Workouts (self-closing)
+  const workoutSCRegex = /<Workout\s([^>]*?)\/>/g
+  let match: RegExpExecArray | null
+  while ((match = workoutSCRegex.exec(text)) !== null) {
+    const attrs = parseAttributes(match[1])
+    const workoutType = attrs.workoutActivityType || ''
+    const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
+    const startDate = attrs.startDate || ''
+    const endDate = attrs.endDate || ''
+    const duration = parseFloat(attrs.duration || '0')
+    const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
+    const totalDistance = parseFloat(attrs.totalDistance || '0')
+    const sourceName = attrs.sourceName || ''
+    const creationDate = attrs.creationDate || startDate
+    const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
+    if (!workoutSourceIds.has(sourceId)) {
+      workoutSourceIds.add(sourceId)
+      workoutBatch.push({ sourceId, workoutActivityType: workoutType, activityName, duration: duration / 60, totalEnergyBurned, totalDistance: totalDistance / 1000, sourceName, startDate, endDate, creationDate })
+      workoutsFound++
+    }
+  }
 
-  while (i < text.length) {
-    // Find next '<'
-    const tagStart = text.indexOf('<', i)
-    if (tagStart === -1) break
+  // Pass 2: Workouts (non-self-closing opening tags)
+  const workoutBlockRegex = /<Workout\s([^>]*?)>/g
+  while ((match = workoutBlockRegex.exec(text)) !== null) {
+    if (text[match.index + match[0].length - 2] === '/') continue
+    const attrs = parseAttributes(match[1])
+    const workoutType = attrs.workoutActivityType || ''
+    const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
+    const startDate = attrs.startDate || ''
+    const endDate = attrs.endDate || ''
+    const duration = parseFloat(attrs.duration || '0')
+    const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
+    const totalDistance = parseFloat(attrs.totalDistance || '0')
+    const sourceName = attrs.sourceName || ''
+    const creationDate = attrs.creationDate || startDate
+    const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
+    if (!workoutSourceIds.has(sourceId)) {
+      workoutSourceIds.add(sourceId)
+      workoutBatch.push({ sourceId, workoutActivityType: workoutType, activityName, duration: duration / 60, totalEnergyBurned, totalDistance: totalDistance / 1000, sourceName, startDate, endDate, creationDate })
+      workoutsFound++
+    }
+  }
 
-    // Quick check: skip if not a tag we care about
-    const nextChar = text.charCodeAt(tagStart + 1)
+  self.postMessage({
+    type: 'progress', bytesRead: 0, totalBytes, workoutsFound, recordsProcessed,
+  } satisfies WorkerProgress)
 
-    // 'W' = 87, 'R' = 82, 'A' = 65
-    if (nextChar !== 87 && nextChar !== 82 && nextChar !== 65) {
-      // Skip to end of this tag
-      const end = text.indexOf('>', tagStart + 1)
-      i = end === -1 ? text.length : end + 1
+  // Pass 3: Records (self-closing) — this is the big one, millions of elements
+  const recordRegex = /<Record\s([^>]*?)\/>/g
+  while ((match = recordRegex.exec(text)) !== null) {
+    const snippet = match[1]
+
+    // Quick filter: check if this is a record type we care about
+    if (snippet.indexOf('StepCount') === -1 &&
+        snippet.indexOf('ActiveEnergyBurned') === -1 &&
+        snippet.indexOf('DistanceWalkingRunning') === -1) {
       continue
     }
 
-    // Find end of tag
-    const tagEnd = text.indexOf('>', tagStart + 1)
-    if (tagEnd === -1) break
+    const attrs = parseAttributes(snippet)
+    const recordType = attrs.type as RecordType | undefined
+    if (!recordType || !RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) continue
 
-    // Check if self-closing
-    const isSelfClosing = text.charCodeAt(tagEnd - 1) === 47 // '/'
+    const value = parseFloat(attrs.value || '0')
+    const startDate = attrs.startDate || ''
+    const dateStr = startDate.substring(0, 10)
+    const metricType = RECORD_TYPE_TO_METRIC[recordType as RecordType]
+    const key = `${dateStr}|${metricType}`
+    dailyAggregates.set(key, (dailyAggregates.get(key) ?? 0) + value)
+    recordsProcessed++
 
-    // Extract tag name (up to first space)
-    let nameEnd = tagStart + 1
-    while (nameEnd < tagEnd && text.charCodeAt(nameEnd) !== 32) nameEnd++ // space
-    const tagName = text.substring(tagStart + 1, nameEnd)
-
-    if (tagName === 'Workout') {
-      const attrEnd = isSelfClosing ? tagEnd - 1 : tagEnd
-      const attrString = text.substring(nameEnd + 1, attrEnd)
-      const attrs = parseAttributes(attrString)
-
-      const workoutType = attrs.workoutActivityType || ''
-      const activityName = WORKOUT_TYPE_LABELS[workoutType] || workoutType.replace('HKWorkoutActivityType', '')
-      const startDate = attrs.startDate || ''
-      const endDate = attrs.endDate || ''
-      const duration = parseFloat(attrs.duration || '0')
-      const totalEnergyBurned = parseFloat(attrs.totalEnergyBurned || '0')
-      const totalDistance = parseFloat(attrs.totalDistance || '0')
-      const sourceName = attrs.sourceName || ''
-      const creationDate = attrs.creationDate || startDate
-
-      const sourceId = simpleHash(`${workoutType}|${startDate}|${endDate}|${sourceName}|${duration}`)
-      if (!workoutSourceIds.has(sourceId)) {
-        workoutSourceIds.add(sourceId)
-        workoutBatch.push({
-          sourceId,
-          workoutActivityType: workoutType,
-          activityName,
-          duration: duration / 60,
-          totalEnergyBurned,
-          totalDistance: totalDistance / 1000,
-          sourceName,
-          startDate,
-          endDate,
-          creationDate,
-        })
-        workoutsFound++
-      }
-    } else if (tagName === 'Record' && isSelfClosing) {
-      const attrString = text.substring(nameEnd + 1, tagEnd - 1)
-      const attrs = parseAttributes(attrString)
-      const recordType = attrs.type as RecordType | undefined
-
-      if (recordType && RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) {
-        const value = parseFloat(attrs.value || '0')
-        const startDate = attrs.startDate || ''
-        const dateStr = startDate.substring(0, 10)
-        const metricType = RECORD_TYPE_TO_METRIC[recordType as RecordType]
-        const key = `${dateStr}|${metricType}`
-        dailyAggregates.set(key, (dailyAggregates.get(key) ?? 0) + value)
-        recordsProcessed++
-      }
-    } else if (tagName === 'ActivitySummary' && isSelfClosing) {
-      const attrString = text.substring(nameEnd + 1, tagEnd - 1)
-      const attrs = parseAttributes(attrString)
-      activitySummaryBatch.push({
-        date: attrs.dateComponents || '',
-        activeEnergyBurned: parseFloat(attrs.activeEnergyBurned || '0'),
-        activeEnergyBurnedGoal: parseFloat(attrs.activeEnergyBurnedGoal || '0'),
-        appleExerciseTime: parseFloat(attrs.appleExerciseTime || '0'),
-        appleExerciseTimeGoal: parseFloat(attrs.appleExerciseTimeGoal || '0'),
-        appleStandHours: parseFloat(attrs.appleStandHours || '0'),
-        appleStandHoursGoal: parseFloat(attrs.appleStandHoursGoal || '0'),
-      })
-      activitySummariesFound++
-    }
-
-    i = tagEnd + 1
-
-    // Send progress every ~5MB
-    if (i - lastProgress > 5_000_000) {
-      lastProgress = i
+    if (recordsProcessed % 50000 === 0) {
       self.postMessage({
-        type: 'progress',
-        bytesRead: i,
-        totalBytes,
-        workoutsFound,
-        recordsProcessed,
+        type: 'progress', bytesRead: recordRegex.lastIndex, totalBytes, workoutsFound, recordsProcessed,
       } satisfies WorkerProgress)
     }
   }
 
-  // Send results
+  // Pass 4: Records (non-self-closing) — some Record elements have child MetadataEntry elements
+  const recordBlockRegex = /<Record\s([^>]*?)(?<!\\)>/g
+  while ((match = recordBlockRegex.exec(text)) !== null) {
+    // Skip self-closing (already handled above)
+    if (match[0].endsWith('/>')) continue
+
+    const snippet = match[1]
+    if (snippet.indexOf('StepCount') === -1 &&
+        snippet.indexOf('ActiveEnergyBurned') === -1 &&
+        snippet.indexOf('DistanceWalkingRunning') === -1) {
+      continue
+    }
+
+    const attrs = parseAttributes(snippet)
+    const recordType = attrs.type as RecordType | undefined
+    if (!recordType || !RECORD_TYPES_OF_INTEREST.includes(recordType as RecordType)) continue
+
+    const value = parseFloat(attrs.value || '0')
+    const startDate = attrs.startDate || ''
+    const dateStr = startDate.substring(0, 10)
+    const metricType = RECORD_TYPE_TO_METRIC[recordType as RecordType]
+    const key = `${dateStr}|${metricType}`
+    dailyAggregates.set(key, (dailyAggregates.get(key) ?? 0) + value)
+    recordsProcessed++
+  }
+
+  // Pass 5: ActivitySummary elements
+  const activitySummaryRegex = /<ActivitySummary\s([^>]*?)\/>/g
+  while ((match = activitySummaryRegex.exec(text)) !== null) {
+    const attrs = parseAttributes(match[1])
+    activitySummaryBatch.push({
+      date: attrs.dateComponents || '',
+      activeEnergyBurned: parseFloat(attrs.activeEnergyBurned || '0'),
+      activeEnergyBurnedGoal: parseFloat(attrs.activeEnergyBurnedGoal || '0'),
+      appleExerciseTime: parseFloat(attrs.appleExerciseTime || '0'),
+      appleExerciseTimeGoal: parseFloat(attrs.appleExerciseTimeGoal || '0'),
+      appleStandHours: parseFloat(attrs.appleStandHours || '0'),
+      appleStandHoursGoal: parseFloat(attrs.appleStandHoursGoal || '0'),
+    })
+    activitySummariesFound++
+  }
+
+  // Send all results
   if (workoutBatch.length > 0) {
     self.postMessage({ type: 'workouts', data: workoutBatch } satisfies WorkerWorkouts)
   }
@@ -217,12 +227,7 @@ function processXmlText(text: string) {
   for (const [key, value] of dailyAggregates) {
     const [date, metricType] = key.split('|')
     const recordType = Object.entries(RECORD_TYPE_TO_METRIC).find(([, v]) => v === metricType)?.[0] as RecordType | undefined
-    dailyMetrics.push({
-      date,
-      metricType,
-      value,
-      unit: recordType ? RECORD_TYPE_UNITS[recordType] : '',
-    })
+    dailyMetrics.push({ date, metricType, value, unit: recordType ? RECORD_TYPE_UNITS[recordType] : '' })
   }
 
   if (dailyMetrics.length > 0) {
@@ -236,12 +241,7 @@ function processXmlText(text: string) {
   const durationMs = performance.now() - startTime
   self.postMessage({
     type: 'complete',
-    stats: {
-      workoutsFound,
-      recordsProcessed,
-      activitySummaries: activitySummariesFound,
-      durationMs,
-    },
+    stats: { workoutsFound, recordsProcessed, activitySummaries: activitySummariesFound, durationMs },
   } satisfies WorkerComplete)
 }
 
