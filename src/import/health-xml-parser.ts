@@ -73,8 +73,8 @@ function buildDocBody(data: Record<string, unknown>): { fields: Record<string, u
   return { fields }
 }
 
-const BATCH_SIZE = 20 // concurrent PATCH requests per wave
-const BATCH_DELAY_MS = 300 // pause between waves
+const BATCH_SIZE = 5 // concurrent PATCH requests per wave (conservative)
+const BATCH_DELAY_MS = 1000 // 1s pause between waves
 
 // Write a single document via REST PATCH (equivalent to setDoc)
 // Retries on 429 (rate limit) with exponential backoff
@@ -102,8 +102,8 @@ async function patchDoc(
     if (resp.ok) return
 
     if (resp.status === 429 && attempt < MAX_RETRIES) {
-      // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-      const delay = Math.pow(2, attempt + 1) * 1000
+      // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+      const delay = Math.pow(2, attempt) * 5000
       console.log(`[Import] Rate limited on ${collectionName}/${docId}, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`)
       await new Promise(r => setTimeout(r, delay))
       continue
