@@ -45,14 +45,13 @@ async function getAuthToken(): Promise<string> {
 }
 
 // Convert a JS value to a Firestore REST API value object
+// IMPORTANT: Always use doubleValue for numbers to preserve decimal precision.
+// Using integerValue truncates values like 20.7 minutes → 20.
 function toFirestoreValue(val: unknown): Record<string, unknown> {
   if (val === null || val === undefined) return { nullValue: null }
   if (typeof val === 'string') return { stringValue: val }
   if (typeof val === 'boolean') return { booleanValue: val }
-  if (typeof val === 'number') {
-    if (Number.isInteger(val)) return { integerValue: String(val) }
-    return { doubleValue: val }
-  }
+  if (typeof val === 'number') return { doubleValue: val }
   if (val instanceof Date) return { timestampValue: val.toISOString() }
   if (Array.isArray(val)) return { arrayValue: { values: val.map(toFirestoreValue) } }
   if (typeof val === 'object') {

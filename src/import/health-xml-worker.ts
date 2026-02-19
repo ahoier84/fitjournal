@@ -89,6 +89,24 @@ function parseAttributes(attrString: string): Record<string, string> {
 // Processes XML text chunk-by-chunk, extracting complete tags as they appear.
 // Keeps a small leftover buffer (~1KB) for tags split across chunk boundaries.
 
+// Convert energy to kcal based on unit string
+function toKcal(value: number, unit: string): number {
+  const u = unit.toLowerCase()
+  if (u === 'kj' || u === 'kilojoules') return value / 4.184
+  if (u === 'cal' && value > 10000) return value / 1000 // likely small calories
+  // kcal, Cal, Calories are all kilocalories
+  return value
+}
+
+// Convert distance to km based on unit string
+function toKm(value: number, unit: string): number {
+  const u = unit.toLowerCase()
+  if (u === 'mi' || u === 'mile' || u === 'miles') return value * 1.60934
+  if (u === 'm' || u === 'meter' || u === 'meters') return value / 1000
+  // km is already km
+  return value
+}
+
 // Pending workout being assembled from opening tag + WorkoutStatistics children
 interface PendingWorkout {
   workoutType: string
@@ -98,12 +116,14 @@ interface PendingWorkout {
   durationAttr: number       // duration from Workout attribute (may be 0 on iOS 16+)
   durationUnit: string       // unit for durationAttr (e.g. 'min' or 's')
   energyBurnedAttr: number   // totalEnergyBurned from Workout attribute (may be 0 on iOS 16+)
+  energyBurnedUnit: string   // unit for energyBurnedAttr (e.g. 'kcal', 'kJ')
   distanceAttr: number       // totalDistance from Workout attribute (may be 0 on iOS 16+)
   distanceUnit: string       // unit for distanceAttr (e.g. 'km' or 'mi')
   sourceName: string
   creationDate: string
   // Values from WorkoutStatistics children (iOS 16+)
   statsEnergy: number
+  statsEnergyUnit: string    // unit from WorkoutStatistics energy element
   statsDistance: number
   statsDistanceUnit: string  // unit from WorkoutStatistics distance element
 }
@@ -175,14 +195,20 @@ class StreamingXmlProcessor {
 
   private finalizeWorkout(pw: PendingWorkout) {
     // Use WorkoutStatistics values if available, fall back to Workout attributes
-    const totalEnergyBurned = pw.statsEnergy > 0 ? pw.statsEnergy : pw.energyBurnedAttr
-    const totalDistance = pw.statsDistance > 0 ? pw.statsDistance : pw.distanceAttr
-    // Distance unit: WorkoutStatistics report in km, Workout attributes also in km
-    // (Apple Health exports use the unit attribute — both are typically km)
-    // No conversion needed — store as-is in km
-    const distanceKm = pw.statsDistanceUnit === 'km' || pw.distanceUnit === 'km'
-      ? totalDistance
-      : totalDistance / 1000 // fallback: assume meters if unit not specified
+    // Convert to standard units: kcal for energy, km for distance
+    let energyKcal: number
+    if (pw.statsEnergy > 0) {
+      energyKcal = toKcal(pw.statsEnergy, pw.statsEnergyUnit || 'kcal')
+    } else {
+      energyKcal = toKcal(pw.energyBurnedAttr, pw.energyBurnedUnit || 'kcal')
+    }
+
+    let distanceKm: number
+    if (pw.statsDistance > 0) {
+      distanceKm = toKm(pw.statsDistance, pw.statsDistanceUnit || 'km')
+    } else {
+      distanceKm = toKm(pw.distanceAttr, pw.distanceUnit || 'km')
+    }
 
     // Duration: prefer the attribute, convert based on unit.
     // Apple Health durationUnit is typically "min" (minutes) — divide by 60 only if seconds.
@@ -207,7 +233,7 @@ class StreamingXmlProcessor {
         workoutActivityType: pw.workoutType,
         activityName: pw.activityName,
         duration: durationMinutes,
-        totalEnergyBurned,
+        totalEnergyBurned: energyKcal,
         totalDistance: distanceKm,
         sourceName: pw.sourceName,
         startDate: pw.startDate,
@@ -250,6 +276,7 @@ class StreamingXmlProcessor {
           // included in workout calories
           if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned') {
             this.pendingWorkout.statsEnergy += sum
+            this.pendingWorkout.statsEnergyUnit = attrs.unit || 'kcal'
           } else if (
             statType === 'HKQuantityTypeIdentifierDistanceWalkingRunning' ||
             statType === 'HKQuantityTypeIdentifierDistanceCycling' ||
@@ -278,6 +305,7 @@ class StreamingXmlProcessor {
         const durationAttr = parseFloat(attrs.duration || '0')
         const durationUnit = (attrs.durationUnit || '').toLowerCase()
         const energyBurnedAttr = parseFloat(attrs.totalEnergyBurned || '0')
+        const energyBurnedUnit = (attrs.totalEnergyBurnedUnit || 'kcal').toLowerCase()
         const distanceAttr = parseFloat(attrs.totalDistance || '0')
         const distanceUnit = (attrs.totalDistanceUnit || '').toLowerCase()
         const sourceName = attrs.sourceName || ''
@@ -286,8 +314,8 @@ class StreamingXmlProcessor {
         if (isSelfClosing) {
           this.finalizeWorkout({
             workoutType, activityName, startDate, endDate,
-            durationAttr, durationUnit, energyBurnedAttr, distanceAttr, distanceUnit,
-            sourceName, creationDate, statsEnergy: 0, statsDistance: 0, statsDistanceUnit: '',
+            durationAttr, durationUnit, energyBurnedAttr, energyBurnedUnit, distanceAttr, distanceUnit,
+            sourceName, creationDate, statsEnergy: 0, statsEnergyUnit: '', statsDistance: 0, statsDistanceUnit: '',
           })
         } else {
           // If there was a previous pending workout that never got closed, finalize it first
@@ -296,8 +324,8 @@ class StreamingXmlProcessor {
           }
           this.pendingWorkout = {
             workoutType, activityName, startDate, endDate,
-            durationAttr, durationUnit, energyBurnedAttr, distanceAttr, distanceUnit,
-            sourceName, creationDate, statsEnergy: 0, statsDistance: 0, statsDistanceUnit: '',
+            durationAttr, durationUnit, energyBurnedAttr, energyBurnedUnit, distanceAttr, distanceUnit,
+            sourceName, creationDate, statsEnergy: 0, statsEnergyUnit: '', statsDistance: 0, statsDistanceUnit: '',
           }
         }
       }
