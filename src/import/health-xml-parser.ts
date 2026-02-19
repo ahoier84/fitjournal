@@ -77,6 +77,7 @@ const BATCH_SIZE = 20 // concurrent PATCH requests per wave
 const BATCH_DELAY_MS = 300 // pause between waves
 
 // Write a single document via REST PATCH (equivalent to setDoc)
+// Retries on 429 (rate limit) with exponential backoff
 async function patchDoc(
   uid: string,
   collectionName: string,
@@ -86,17 +87,28 @@ async function patchDoc(
 ): Promise<void> {
   const docPath = `${FIRESTORE_BASE}/users/${uid}/${collectionName}/${docId}`
   const body = buildDocBody(data)
+  const MAX_RETRIES = 5
 
-  const resp = await fetch(docPath, {
-    method: 'PATCH',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const resp = await fetch(docPath, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
 
-  if (!resp.ok) {
+    if (resp.ok) return
+
+    if (resp.status === 429 && attempt < MAX_RETRIES) {
+      // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+      const delay = Math.pow(2, attempt + 1) * 1000
+      console.log(`[Import] Rate limited on ${collectionName}/${docId}, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`)
+      await new Promise(r => setTimeout(r, delay))
+      continue
+    }
+
     const text = await resp.text()
     throw new Error(`Firestore PATCH failed (${resp.status}): ${text}`)
   }
@@ -107,13 +119,20 @@ async function commitBatchesRest(
   uid: string,
   items: Array<{ collection: string; docId: string; data: Record<string, unknown> }>,
   label: string,
+  onBatchDone?: (completed: number, total: number) => void,
 ) {
-  const token = await getAuthToken()
+  let token = await getAuthToken()
   const totalBatches = Math.ceil(items.length / BATCH_SIZE)
+  let docsWritten = 0
 
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batchNum = Math.floor(i / BATCH_SIZE) + 1
     const chunk = items.slice(i, i + BATCH_SIZE)
+
+    // Refresh token every 50 batches (~15 min) to avoid expiry
+    if (batchNum % 50 === 0) {
+      token = await getAuthToken()
+    }
 
     console.log(`[Import] ${label}: writing batch ${batchNum}/${totalBatches} (${chunk.length} docs)...`)
 
@@ -121,7 +140,9 @@ async function commitBatchesRest(
       chunk.map(item => patchDoc(uid, item.collection, item.docId, item.data, token))
     )
 
-    console.log(`[Import] ${label}: batch ${batchNum}/${totalBatches} done`)
+    docsWritten += chunk.length
+    console.log(`[Import] ${label}: batch ${batchNum}/${totalBatches} done (${docsWritten}/${items.length} total)`)
+    onBatchDone?.(docsWritten, items.length)
 
     if (i + BATCH_SIZE < items.length) {
       await new Promise(r => setTimeout(r, BATCH_DELAY_MS))
