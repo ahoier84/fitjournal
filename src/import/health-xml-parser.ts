@@ -74,10 +74,36 @@ function buildDocBody(data: Record<string, unknown>): { fields: Record<string, u
   return { fields }
 }
 
-const BATCH_SIZE = 100
-const BATCH_DELAY_MS = 500
+const BATCH_SIZE = 20 // concurrent PATCH requests per wave
+const BATCH_DELAY_MS = 300 // pause between waves
 
-// Write documents using Firestore REST API batch commit
+// Write a single document via REST PATCH (equivalent to setDoc)
+async function patchDoc(
+  uid: string,
+  collectionName: string,
+  docId: string,
+  data: Record<string, unknown>,
+  token: string,
+): Promise<void> {
+  const docPath = `${FIRESTORE_BASE}/users/${uid}/${collectionName}/${docId}`
+  const body = buildDocBody(data)
+
+  const resp = await fetch(docPath, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!resp.ok) {
+    const text = await resp.text()
+    throw new Error(`Firestore PATCH failed (${resp.status}): ${text}`)
+  }
+}
+
+// Write documents using individual REST PATCH calls in concurrent waves
 async function commitBatchesRest(
   uid: string,
   items: Array<{ collection: string; docId: string; data: Record<string, unknown> }>,
@@ -90,28 +116,11 @@ async function commitBatchesRest(
     const batchNum = Math.floor(i / BATCH_SIZE) + 1
     const chunk = items.slice(i, i + BATCH_SIZE)
 
-    const writes = chunk.map(item => ({
-      update: {
-        name: `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/${item.collection}/${item.docId}`,
-        fields: buildDocBody(item.data).fields,
-      },
-    }))
+    console.log(`[Import] ${label}: writing batch ${batchNum}/${totalBatches} (${chunk.length} docs)...`)
 
-    console.log(`[Import] ${label}: committing batch ${batchNum}/${totalBatches} (${chunk.length} docs)...`)
-
-    const resp = await fetch(`${FIRESTORE_BASE}:batchWrite`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ writes }),
-    })
-
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`Firestore batchWrite failed (${resp.status}): ${text}`)
-    }
+    await Promise.all(
+      chunk.map(item => patchDoc(uid, item.collection, item.docId, item.data, token))
+    )
 
     console.log(`[Import] ${label}: batch ${batchNum}/${totalBatches} done`)
 
