@@ -92,6 +92,7 @@ export function formatCalories(kcal: number): string {
 }
 
 export function formatDistance(km: number): string {
-  if (km < 1) return `${Math.round(km * 1000)}m`
-  return `${km.toFixed(1)} km`
+  const miles = km * 0.621371
+  if (miles < 0.1) return `${Math.round(km * 1000)} m`
+  return `${miles.toFixed(2)} mi`
 }

@@ -90,8 +90,8 @@ export function DashboardPage() {
         <StatCard
           icon={MapPin}
           label="Distance"
-          value={todayStats ? todayStats.distance.toFixed(1) : '0'}
-          unit="km"
+          value={todayStats ? (todayStats.distance * 0.621371).toFixed(2) : '0'}
+          unit="mi"
           color="#10b981"
         />
       </div>

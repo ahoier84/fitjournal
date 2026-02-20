@@ -122,6 +122,7 @@ interface PendingWorkout {
   sourceName: string
   creationDate: string
   // Values from WorkoutStatistics children (iOS 16+)
+  hasWorkoutStatistics: boolean // true if any WorkoutStatistics children were found
   statsEnergy: number
   statsEnergyUnit: string    // unit from WorkoutStatistics energy element
   statsDistance: number
@@ -194,17 +195,22 @@ class StreamingXmlProcessor {
   }
 
   private finalizeWorkout(pw: PendingWorkout) {
-    // Use WorkoutStatistics values if available, fall back to Workout attributes
-    // Convert to standard units: kcal for energy, km for distance
+    // Use WorkoutStatistics values if available, fall back to Workout attributes.
+    // IMPORTANT: When WorkoutStatistics children exist (iOS 16+), ALWAYS use
+    // their values — the Workout attribute totalEnergyBurned often includes
+    // basal (resting) energy which inflates the number. If WorkoutStatistics
+    // exist but ActiveEnergyBurned is 0, it means the workout didn't track it.
     let energyKcal: number
-    if (pw.statsEnergy > 0) {
+    if (pw.hasWorkoutStatistics) {
+      // Use stats value (active-only), even if 0
       energyKcal = toKcal(pw.statsEnergy, pw.statsEnergyUnit || 'kcal')
     } else {
+      // Older iOS: no WorkoutStatistics, use the attribute as-is
       energyKcal = toKcal(pw.energyBurnedAttr, pw.energyBurnedUnit || 'kcal')
     }
 
     let distanceKm: number
-    if (pw.statsDistance > 0) {
+    if (pw.hasWorkoutStatistics) {
       distanceKm = toKm(pw.statsDistance, pw.statsDistanceUnit || 'km')
     } else {
       distanceKm = toKm(pw.distanceAttr, pw.distanceUnit || 'km')
@@ -268,6 +274,7 @@ class StreamingXmlProcessor {
       // <WorkoutStatistics .../> — add stats to pending workout
       if (match[1] !== undefined) {
         if (this.pendingWorkout) {
+          this.pendingWorkout.hasWorkoutStatistics = true
           const attrs = parseAttributes(match[1])
           const statType = attrs.type || ''
           const sum = parseFloat(attrs.sum || '0')
@@ -315,7 +322,7 @@ class StreamingXmlProcessor {
           this.finalizeWorkout({
             workoutType, activityName, startDate, endDate,
             durationAttr, durationUnit, energyBurnedAttr, energyBurnedUnit, distanceAttr, distanceUnit,
-            sourceName, creationDate, statsEnergy: 0, statsEnergyUnit: '', statsDistance: 0, statsDistanceUnit: '',
+            sourceName, creationDate, hasWorkoutStatistics: false, statsEnergy: 0, statsEnergyUnit: '', statsDistance: 0, statsDistanceUnit: '',
           })
         } else {
           // If there was a previous pending workout that never got closed, finalize it first
@@ -325,7 +332,7 @@ class StreamingXmlProcessor {
           this.pendingWorkout = {
             workoutType, activityName, startDate, endDate,
             durationAttr, durationUnit, energyBurnedAttr, energyBurnedUnit, distanceAttr, distanceUnit,
-            sourceName, creationDate, statsEnergy: 0, statsEnergyUnit: '', statsDistance: 0, statsDistanceUnit: '',
+            sourceName, creationDate, hasWorkoutStatistics: false, statsEnergy: 0, statsEnergyUnit: '', statsDistance: 0, statsDistanceUnit: '',
           }
         }
       }
