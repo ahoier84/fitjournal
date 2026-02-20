@@ -79,6 +79,18 @@ export function getActivityLabel(type: string): string {
   return WORKOUT_TYPE_LABELS[type] || type.replace('HKWorkoutActivityType', '')
 }
 
+// Reverse map: "Running" -> "HKWorkoutActivityTypeRunning"
+export const ACTIVITY_NAME_TO_HK_TYPE: Record<string, string> = Object.fromEntries(
+  Object.entries(WORKOUT_TYPE_LABELS).map(([k, v]) => [v, k])
+)
+
+export function getWorkoutTypeKey(activityName: string): string {
+  return ACTIVITY_NAME_TO_HK_TYPE[activityName] || 'HKWorkoutActivityTypeOther'
+}
+
+// Deduplicated, sorted list of display names for manual entry dropdown
+export const MANUAL_WORKOUT_TYPES: string[] = [...new Set(Object.values(WORKOUT_TYPE_LABELS))].sort()
+
 export function formatDuration(minutes: number): string {
   const hrs = Math.floor(minutes / 60)
   const mins = Math.round(minutes % 60)

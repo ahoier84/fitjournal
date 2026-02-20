@@ -9,6 +9,7 @@ import { CalendarPage } from '@/pages/CalendarPage'
 import { TrendsPage } from '@/pages/TrendsPage'
 import { ImportPage } from '@/pages/ImportPage'
 import { SettingsPage } from '@/pages/SettingsPage'
+import { ManualWorkoutPage } from '@/pages/ManualWorkoutPage'
 
 function AuthGate() {
   const { user, loading } = useAuth()
@@ -30,6 +31,7 @@ function AuthGate() {
       <Route element={<AppShell />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/workouts" element={<WorkoutHistoryPage />} />
+        <Route path="/workouts/new" element={<ManualWorkoutPage />} />
         <Route path="/workouts/:id" element={<WorkoutDetailPage />} />
         <Route path="/calendar" element={<CalendarPage />} />
         <Route path="/trends" element={<TrendsPage />} />

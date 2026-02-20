@@ -1,10 +1,14 @@
+import { useCallback } from 'react'
 import { Link } from 'react-router'
-import { Footprints, Flame, MapPin, ChevronRight, Dumbbell } from 'lucide-react'
+import { Footprints, Flame, MapPin, ChevronRight, Dumbbell, Plus } from 'lucide-react'
 import { useWorkouts } from '@/hooks/useWorkouts'
 import { useDailyStats } from '@/hooks/useDailyStats'
 import { useDailyStatsRange } from '@/hooks/useDailyStats'
+import { useAuth } from '@/contexts/AuthContext'
+import { saveDailyMetric } from '@/hooks/useSaveDailyMetric'
 import { formatDate, formatTime, getWeekDays, toDateString } from '@/lib/date-utils'
 import { formatDuration, formatCalories, getWorkoutIcon, getWorkoutColor } from '@/lib/workout-utils'
+import { EditableStatCard } from '@/components/dashboard/EditableStatCard'
 import { cn } from '@/lib/utils'
 
 function StatCard({ icon: Icon, label, value, unit, color }: {
@@ -65,27 +69,40 @@ function WeeklyOverview() {
 }
 
 export function DashboardPage() {
+  const { user } = useAuth()
   const todayStats = useDailyStats()
   const recentWorkouts = useWorkouts({ limit: 5 })
+
+  const handleSaveSteps = useCallback(async (value: number) => {
+    if (user) await saveDailyMetric(user.uid, 'steps', value)
+  }, [user])
+
+  const handleSaveCalories = useCallback(async (value: number) => {
+    if (user) await saveDailyMetric(user.uid, 'activeEnergy', value)
+  }, [user])
 
   return (
     <div>
       <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <StatCard
+        <EditableStatCard
           icon={Footprints}
           label="Steps Today"
-          value={todayStats ? todayStats.steps.toLocaleString() : '0'}
+          value={todayStats?.steps ?? 0}
+          displayValue={todayStats ? todayStats.steps.toLocaleString() : '0'}
           unit="steps"
           color="#3b82f6"
+          onSave={handleSaveSteps}
         />
-        <StatCard
+        <EditableStatCard
           icon={Flame}
           label="Active Energy"
-          value={todayStats ? Math.round(todayStats.activeEnergy).toLocaleString() : '0'}
+          value={todayStats?.activeEnergy ?? 0}
+          displayValue={todayStats ? Math.round(todayStats.activeEnergy).toLocaleString() : '0'}
           unit="cal"
           color="#ef4444"
+          onSave={handleSaveCalories}
         />
         <StatCard
           icon={MapPin}
@@ -102,9 +119,14 @@ export function DashboardPage() {
         <div className="bg-card rounded-xl border border-border p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-medium text-muted-foreground">Recent Workouts</h3>
-            <Link to="/workouts" className="text-sm text-primary hover:underline flex items-center gap-1">
-              View all <ChevronRight className="w-4 h-4" />
-            </Link>
+            <div className="flex items-center gap-3">
+              <Link to="/workouts/new" className="text-sm text-primary hover:underline flex items-center gap-1">
+                <Plus className="w-3.5 h-3.5" /> Log
+              </Link>
+              <Link to="/workouts" className="text-sm text-primary hover:underline flex items-center gap-1">
+                View all <ChevronRight className="w-4 h-4" />
+              </Link>
+            </div>
           </div>
 
           {!recentWorkouts || recentWorkouts.length === 0 ? (

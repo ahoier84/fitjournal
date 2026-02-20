@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { Search, SlidersHorizontal, BookOpen } from 'lucide-react'
+import { Search, SlidersHorizontal, BookOpen, Plus } from 'lucide-react'
 import { useWorkouts, useWorkoutTypes } from '@/hooks/useWorkouts'
 import { useJournalEntries } from '@/hooks/useJournalEntry'
 import { formatDate, formatTime } from '@/lib/date-utils'
@@ -24,7 +24,16 @@ export function WorkoutHistoryPage() {
 
   return (
     <div>
-      <h2 className="text-2xl font-bold mb-6">Workout History</h2>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold">Workout History</h2>
+        <Link
+          to="/workouts/new"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          Log Workout
+        </Link>
+      </div>
 
       <div className="bg-card rounded-xl border border-border p-4 mb-6">
         <div className="flex flex-wrap gap-3">
@@ -75,6 +84,8 @@ export function WorkoutHistoryPage() {
       {!filtered || filtered.length === 0 ? (
         <div className="bg-card rounded-xl border border-border p-12 text-center text-muted-foreground">
           <p className="mb-2">No workouts found.</p>
+          <Link to="/workouts/new" className="text-primary hover:underline text-sm">Log a workout manually</Link>
+          <span className="text-sm mx-1">or</span>
           <Link to="/import" className="text-primary hover:underline text-sm">Import from Apple Health</Link>
         </div>
       ) : (
