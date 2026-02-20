@@ -1,6 +1,6 @@
-import { useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { Link } from 'react-router'
-import { Footprints, Flame, MapPin, ChevronRight, Dumbbell, Plus } from 'lucide-react'
+import { Footprints, Flame, MapPin, ChevronRight, ChevronLeft, Dumbbell, Plus } from 'lucide-react'
 import { useWorkouts } from '@/hooks/useWorkouts'
 import { useDailyStats } from '@/hooks/useDailyStats'
 import { useDailyStatsRange } from '@/hooks/useDailyStats'
@@ -10,26 +10,6 @@ import { formatDate, formatTime, getWeekDays, toDateString } from '@/lib/date-ut
 import { formatDuration, formatCalories, getWorkoutIcon, getWorkoutColor } from '@/lib/workout-utils'
 import { EditableStatCard } from '@/components/dashboard/EditableStatCard'
 import { cn } from '@/lib/utils'
-
-function StatCard({ icon: Icon, label, value, unit, color }: {
-  icon: typeof Footprints
-  label: string
-  value: string
-  unit: string
-  color: string
-}) {
-  return (
-    <div className="bg-card rounded-xl border border-border p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center')} style={{ backgroundColor: color + '15', color }}>
-          <Icon className="w-5 h-5" />
-        </div>
-        <span className="text-sm text-muted-foreground">{label}</span>
-      </div>
-      <p className="text-2xl font-bold">{value} <span className="text-sm font-normal text-muted-foreground">{unit}</span></p>
-    </div>
-  )
-}
 
 function WeeklyOverview() {
   const weekDays = getWeekDays()
@@ -70,25 +50,85 @@ function WeeklyOverview() {
 
 export function DashboardPage() {
   const { user } = useAuth()
-  const todayStats = useDailyStats()
+  const [selectedDate, setSelectedDate] = useState(new Date())
+  const todayStats = useDailyStats(selectedDate)
   const recentWorkouts = useWorkouts({ limit: 5 })
 
+  const todayStr = toDateString(new Date())
+  const selectedStr = toDateString(selectedDate)
+  const isToday = selectedStr === todayStr
+
+  const goBack = useCallback(() => {
+    setSelectedDate(prev => {
+      const d = new Date(prev)
+      d.setDate(d.getDate() - 1)
+      return d
+    })
+  }, [])
+
+  const goForward = useCallback(() => {
+    if (isToday) return
+    setSelectedDate(prev => {
+      const d = new Date(prev)
+      d.setDate(d.getDate() + 1)
+      return d
+    })
+  }, [isToday])
+
+  const goToday = useCallback(() => {
+    setSelectedDate(new Date())
+  }, [])
+
   const handleSaveSteps = useCallback(async (value: number) => {
-    if (user) await saveDailyMetric(user.uid, 'steps', value)
-  }, [user])
+    if (user) await saveDailyMetric(user.uid, 'steps', value, selectedDate)
+  }, [user, selectedDate])
 
   const handleSaveCalories = useCallback(async (value: number) => {
-    if (user) await saveDailyMetric(user.uid, 'activeEnergy', value)
-  }, [user])
+    if (user) await saveDailyMetric(user.uid, 'activeEnergy', value, selectedDate)
+  }, [user, selectedDate])
+
+  const handleSaveDistance = useCallback(async (valueMiles: number) => {
+    // Convert miles to km for storage
+    const km = valueMiles / 0.621371
+    if (user) await saveDailyMetric(user.uid, 'distanceWalkingRunning', km, selectedDate)
+  }, [user, selectedDate])
+
+  const distanceMiles = todayStats ? todayStats.distance * 0.621371 : 0
 
   return (
     <div>
       <h2 className="text-2xl font-bold mb-6">Dashboard</h2>
 
+      {/* Date navigation */}
+      <div className="flex items-center gap-3 mb-4">
+        <button
+          onClick={goBack}
+          className="p-1.5 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
+        >
+          <ChevronLeft className="w-5 h-5" />
+        </button>
+        <button
+          onClick={goToday}
+          className={cn(
+            'text-sm font-medium px-3 py-1 rounded-lg transition-colors',
+            isToday ? 'text-primary' : 'text-foreground hover:bg-secondary'
+          )}
+        >
+          {isToday ? 'Today' : formatDate(selectedDate)}
+        </button>
+        <button
+          onClick={goForward}
+          disabled={isToday}
+          className="p-1.5 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+        >
+          <ChevronRight className="w-5 h-5" />
+        </button>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <EditableStatCard
           icon={Footprints}
-          label="Steps Today"
+          label={isToday ? 'Steps Today' : 'Steps'}
           value={todayStats?.steps ?? 0}
           displayValue={todayStats ? todayStats.steps.toLocaleString() : '0'}
           unit="steps"
@@ -97,19 +137,22 @@ export function DashboardPage() {
         />
         <EditableStatCard
           icon={Flame}
-          label="Active Energy"
+          label={isToday ? 'Active Energy' : 'Active Energy'}
           value={todayStats?.activeEnergy ?? 0}
           displayValue={todayStats ? Math.round(todayStats.activeEnergy).toLocaleString() : '0'}
           unit="cal"
           color="#ef4444"
           onSave={handleSaveCalories}
         />
-        <StatCard
+        <EditableStatCard
           icon={MapPin}
           label="Distance"
-          value={todayStats ? (todayStats.distance * 0.621371).toFixed(2) : '0'}
+          value={Math.round(distanceMiles * 100) / 100}
+          displayValue={distanceMiles.toFixed(2)}
           unit="mi"
           color="#10b981"
+          onSave={handleSaveDistance}
+          step="0.01"
         />
       </div>
 

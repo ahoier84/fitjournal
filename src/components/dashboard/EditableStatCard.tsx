@@ -10,9 +10,10 @@ interface EditableStatCardProps {
   unit: string
   color: string
   onSave: (value: number) => Promise<void>
+  step?: string
 }
 
-export function EditableStatCard({ icon: Icon, label, value, displayValue, unit, color, onSave }: EditableStatCardProps) {
+export function EditableStatCard({ icon: Icon, label, value, displayValue, unit, color, onSave, step }: EditableStatCardProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [inputValue, setInputValue] = useState('')
   const [saving, setSaving] = useState(false)
@@ -75,6 +76,7 @@ export function EditableStatCard({ icon: Icon, label, value, displayValue, unit,
             onKeyDown={handleKeyDown}
             disabled={saving}
             min="0"
+            step={step || 'any'}
             className="w-28 px-2 py-1 rounded-lg border border-primary bg-background text-lg font-bold focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
           <span className="text-sm text-muted-foreground">{unit}</span>
