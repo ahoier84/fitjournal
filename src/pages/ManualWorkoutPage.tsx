@@ -107,7 +107,7 @@ export function ManualWorkoutPage() {
         </div>
 
         {/* Date and Time */}
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="text-sm font-medium mb-1.5 block">Date</label>
             <input
@@ -143,7 +143,7 @@ export function ManualWorkoutPage() {
         </div>
 
         {/* Calories and Distance */}
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="text-sm font-medium mb-1.5 block">Calories (kcal)</label>
             <input

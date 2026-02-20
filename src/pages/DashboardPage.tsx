@@ -156,7 +156,7 @@ export function DashboardPage() {
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <WeeklyOverview />
 
         <div className="bg-card rounded-xl border border-border p-5">

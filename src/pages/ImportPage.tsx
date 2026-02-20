@@ -83,7 +83,7 @@ export function ImportPage() {
         onDragLeave={handleDragLeave}
         onClick={() => !importing && fileInputRef.current?.click()}
         className={cn(
-          'border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all mb-6',
+          'border-2 border-dashed rounded-xl p-6 sm:p-12 text-center cursor-pointer transition-all mb-6',
           dragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50',
           importing && 'pointer-events-none opacity-60'
         )}

@@ -12,11 +12,20 @@ const navItems = [
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
+// Bottom tab bar items for mobile (Import accessible from Settings page)
+const mobileNavItems = [
+  { to: '/', label: 'Home', icon: LayoutDashboard },
+  { to: '/workouts', label: 'Workouts', icon: Dumbbell },
+  { to: '/calendar', label: 'Calendar', icon: Calendar },
+  { to: '/trends', label: 'Trends', icon: TrendingUp },
+  { to: '/settings', label: 'More', icon: Settings },
+]
+
 export function Sidebar() {
   const { user, logout } = useAuth()
 
   return (
-    <aside className="w-64 bg-sidebar border-r border-border flex flex-col h-screen sticky top-0">
+    <aside className="hidden md:flex w-64 bg-sidebar border-r border-border flex-col h-screen sticky top-0">
       <div className="p-6">
         <h1 className="text-xl font-bold text-foreground flex items-center gap-2">
           <Dumbbell className="w-6 h-6 text-primary" />
@@ -64,5 +73,32 @@ export function Sidebar() {
         )}
       </div>
     </aside>
+  )
+}
+
+export function MobileBottomNav() {
+  return (
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-sidebar border-t border-border z-50 pb-[env(safe-area-inset-bottom)]">
+      <div className="flex items-center justify-around h-14">
+        {mobileNavItems.map(({ to, label, icon: Icon }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={to === '/'}
+            className={({ isActive }) =>
+              cn(
+                'flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg transition-colors min-w-0',
+                isActive
+                  ? 'text-primary'
+                  : 'text-muted-foreground'
+              )
+            }
+          >
+            <Icon className="w-5 h-5" />
+            <span className="text-[10px] font-medium">{label}</span>
+          </NavLink>
+        ))}
+      </div>
+    </nav>
   )
 }

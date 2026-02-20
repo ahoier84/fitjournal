@@ -116,7 +116,7 @@ export function SettingsPage() {
       {/* Account */}
       <div className="bg-card rounded-xl border border-border p-5 mb-6">
         <h3 className="font-medium mb-4">Account</h3>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             {user?.photoURL && (
               <img src={user.photoURL} alt="" className="w-10 h-10 rounded-full" />
@@ -128,7 +128,7 @@ export function SettingsPage() {
           </div>
           <button
             onClick={logout}
-            className="flex items-center gap-2 px-4 py-2.5 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors"
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors"
           >
             <LogOut className="w-4 h-4" /> Sign Out
           </button>
@@ -140,7 +140,7 @@ export function SettingsPage() {
         <h3 className="font-medium mb-4 flex items-center gap-2">
           <HardDrive className="w-4 h-4" /> Data Summary
         </h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-sm">
           <div>
             <p className="text-muted-foreground">Workouts</p>
             <p className="text-lg font-semibold">{workouts?.length ?? 0}</p>
@@ -167,15 +167,15 @@ export function SettingsPage() {
       {/* Export / Import Backup */}
       <div className="bg-card rounded-xl border border-border p-5 mb-6">
         <h3 className="font-medium mb-4">Backup & Restore</h3>
-        <div className="flex gap-3">
+        <div className="flex flex-col sm:flex-row gap-3">
           <button
             onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors"
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors"
           >
             <Download className="w-4 h-4" /> Export Backup
           </button>
 
-          <label className="flex items-center gap-2 px-4 py-2.5 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors cursor-pointer">
+          <label className="flex items-center justify-center gap-2 px-4 py-2.5 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors cursor-pointer">
             <Upload className="w-4 h-4" /> Restore Backup
             <input type="file" accept=".json" onChange={handleImportBackup} className="hidden" />
           </label>

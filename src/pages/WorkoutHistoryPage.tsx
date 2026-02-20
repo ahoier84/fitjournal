@@ -36,8 +36,8 @@ export function WorkoutHistoryPage() {
       </div>
 
       <div className="bg-card rounded-xl border border-border p-4 mb-6">
-        <div className="flex flex-wrap gap-3">
-          <div className="relative flex-1 min-w-48">
+        <div className="flex flex-col sm:flex-row flex-wrap gap-3">
+          <div className="relative flex-1 min-w-0 sm:min-w-48">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <input
               type="text"
@@ -115,7 +115,7 @@ export function WorkoutHistoryPage() {
                     {formatDate(workout.startDate)} at {formatTime(workout.startDate)}
                   </p>
                 </div>
-                <div className="flex items-center gap-6 text-sm">
+                <div className="flex items-center gap-3 sm:gap-6 text-sm">
                   <div className="text-right">
                     <p className="font-medium">{formatDuration(workout.duration)}</p>
                     <p className="text-muted-foreground">duration</p>
@@ -125,7 +125,7 @@ export function WorkoutHistoryPage() {
                     <p className="text-muted-foreground">energy</p>
                   </div>
                   {workout.totalDistance > 0 && (
-                    <div className="text-right">
+                    <div className="text-right hidden sm:block">
                       <p className="font-medium">{formatDistance(workout.totalDistance)}</p>
                       <p className="text-muted-foreground">distance</p>
                     </div>

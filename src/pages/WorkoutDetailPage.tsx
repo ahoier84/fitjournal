@@ -29,7 +29,7 @@ function RatingSelector({ label, value, onChange, emojis, labels }: {
             key={n}
             onClick={() => onChange(n)}
             className={cn(
-              'flex flex-col items-center gap-1 p-2 rounded-lg border transition-all min-w-14',
+              'flex flex-col items-center gap-1 p-1.5 sm:p-2 rounded-lg border transition-all min-w-11 sm:min-w-14',
               value === n
                 ? 'border-primary bg-primary/10 ring-1 ring-primary'
                 : 'border-border hover:border-primary/30'
@@ -150,10 +150,10 @@ export function WorkoutDetailPage() {
       </Link>
 
       {/* Workout Stats */}
-      <div className="bg-card rounded-xl border border-border p-6 mb-6">
-        <div className="flex items-center gap-4 mb-6">
-          <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: color + '15', color }}>
-            <Icon className="w-7 h-7" />
+      <div className="bg-card rounded-xl border border-border p-4 sm:p-6 mb-6">
+        <div className="flex items-center gap-3 sm:gap-4 mb-6">
+          <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: color + '15', color }}>
+            <Icon className="w-6 h-6 sm:w-7 sm:h-7" />
           </div>
           <div>
             <h2 className="text-xl font-bold">{workout.activityName}</h2>
@@ -196,7 +196,7 @@ export function WorkoutDetailPage() {
       </div>
 
       {/* Journal Entry */}
-      <div className="bg-card rounded-xl border border-border p-6">
+      <div className="bg-card rounded-xl border border-border p-4 sm:p-6">
         <h3 className="text-lg font-semibold mb-4">Journal Entry</h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">

@@ -60,7 +60,7 @@ export function CalendarPage() {
     <div>
       <h2 className="text-2xl font-bold mb-6">Calendar</h2>
 
-      <div className="bg-card rounded-xl border border-border p-6 mb-6">
+      <div className="bg-card rounded-xl border border-border p-3 sm:p-6 mb-6">
         {/* Month Navigation */}
         <div className="flex items-center justify-between mb-6">
           <button
@@ -80,8 +80,8 @@ export function CalendarPage() {
 
         {/* Day Headers */}
         <div className="grid grid-cols-7 mb-2">
-          {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => (
-            <div key={d} className="text-center text-xs font-medium text-muted-foreground py-2">{d}</div>
+          {['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map(d => (
+            <div key={d} className="text-center text-[10px] sm:text-xs font-medium text-muted-foreground py-1 sm:py-2">{d}</div>
           ))}
         </div>
 

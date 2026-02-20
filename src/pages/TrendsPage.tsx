@@ -35,15 +35,15 @@ function MetricChart({ metricType, days, title, color, unit, chartType = 'bar' }
 
   return (
     <div className="bg-card rounded-xl border border-border p-5">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-4 mb-4">
         <h3 className="font-medium">{title}</h3>
-        <div className="flex gap-4 text-sm">
+        <div className="flex gap-3 sm:gap-4 text-xs sm:text-sm">
           <span className="text-muted-foreground">Avg: <span className="font-medium text-foreground">{avg.toLocaleString()} {unit}</span></span>
           <span className="text-muted-foreground">Max: <span className="font-medium text-foreground">{max.toLocaleString()} {unit}</span></span>
         </div>
       </div>
 
-      <div className="h-48">
+      <div className="h-36 md:h-48">
         <ResponsiveContainer width="100%" height="100%">
           {chartType === 'bar' ? (
             <BarChart data={formattedData}>
@@ -111,7 +111,7 @@ function WorkoutFrequencyChart({ days }: { days: number }) {
   return (
     <div className="bg-card rounded-xl border border-border p-5">
       <h3 className="font-medium mb-4">Workout Frequency (per week)</h3>
-      <div className="h-48">
+      <div className="h-36 md:h-48">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={formattedData}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -145,9 +145,9 @@ export function TrendsPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
         <h2 className="text-2xl font-bold">Trends</h2>
-        <div className="flex gap-1 bg-secondary rounded-lg p-1">
+        <div className="flex gap-1 bg-secondary rounded-lg p-1 self-start sm:self-auto">
           {TIME_RANGES.map(range => (
             <button
               key={range.value}
