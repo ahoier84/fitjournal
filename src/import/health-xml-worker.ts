@@ -300,10 +300,15 @@ class StreamingXmlProcessor {
           const sum = parseFloat(attrs.sum || '0')
 
           // Only count active energy — basal (resting) energy should NOT be
-          // included in workout calories
+          // included in workout calories.
+          // Use max instead of sum — a workout may have multiple ActiveEnergyBurned
+          // stats from different sources (e.g., Apple Watch + iPhone) and summing
+          // would double-count.
           if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned') {
-            this.pendingWorkout.statsEnergy += sum
-            this.pendingWorkout.statsEnergyUnit = attrs.unit || 'kcal'
+            if (sum > this.pendingWorkout.statsEnergy) {
+              this.pendingWorkout.statsEnergy = sum
+              this.pendingWorkout.statsEnergyUnit = attrs.unit || 'kcal'
+            }
           } else if (
             statType === 'HKQuantityTypeIdentifierDistanceWalkingRunning' ||
             statType === 'HKQuantityTypeIdentifierDistanceCycling' ||
