@@ -231,6 +231,26 @@ class StreamingXmlProcessor {
       durationMinutes = this.computeDurationMinutes(pw.startDate, pw.endDate)
     }
 
+    // Debug: log details for running workouts to diagnose calorie issues
+    if (pw.workoutType.includes('Running')) {
+      console.log(`[WorkoutDebug] Running workout ${pw.startDate}:`, {
+        hasStats: pw.hasWorkoutStatistics,
+        attrEnergy: pw.energyBurnedAttr,
+        attrEnergyUnit: pw.energyBurnedUnit,
+        statsEnergy: pw.statsEnergy,
+        statsEnergyUnit: pw.statsEnergyUnit,
+        finalEnergyKcal: energyKcal,
+        attrDistance: pw.distanceAttr,
+        attrDistanceUnit: pw.distanceUnit,
+        statsDistance: pw.statsDistance,
+        statsDistanceUnit: pw.statsDistanceUnit,
+        finalDistanceKm: distanceKm,
+        durationAttr: pw.durationAttr,
+        durationUnit: pw.durationUnit,
+        finalDurationMin: durationMinutes,
+      })
+    }
+
     const sourceId = simpleHash(`${pw.workoutType}|${pw.startDate}|${pw.endDate}|${pw.sourceName}|${pw.durationAttr}`)
     if (!this.workoutSourceIds.has(sourceId)) {
       this.workoutSourceIds.add(sourceId)
