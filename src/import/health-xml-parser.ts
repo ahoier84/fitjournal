@@ -234,6 +234,12 @@ export async function parseHealthExport(
 
         case 'workouts': {
           console.log(`[Import] Received ${msg.data.length} workouts from worker, starting save...`)
+          // Debug: log running workouts to main thread console
+          for (const w of msg.data) {
+            if (w.workoutActivityType.includes('Running')) {
+              console.log(`[WorkoutDebug] ${w.startDate} | energy=${w.totalEnergyBurned.toFixed(1)} kcal | distance=${w.totalDistance.toFixed(3)} km (${(w.totalDistance * 0.621371).toFixed(2)} mi) | duration=${w.duration.toFixed(1)} min | source=${w.sourceName}`)
+            }
+          }
           onProgress({ bytesRead: file.size, totalBytes: file.size, workoutsFound: msg.data.length, recordsProcessed: totalRecords, phase: 'saving' })
 
           const workoutDocs = msg.data.map(w => ({
