@@ -299,26 +299,22 @@ class StreamingXmlProcessor {
           const statType = attrs.type || ''
           const sum = parseFloat(attrs.sum || '0')
 
-          // Only count active energy — basal (resting) energy should NOT be
-          // included in workout calories.
-          // Use max instead of sum — a workout may have multiple ActiveEnergyBurned
-          // stats from different sources (e.g., Apple Watch + iPhone) and summing
-          // would double-count.
+          // Sum active energy across all WorkoutActivity segments.
+          // iOS 16+ workouts contain multiple WorkoutActivity children,
+          // each with their own WorkoutStatistics for that segment.
+          // We must SUM them to get the workout total.
+          // Do NOT include basal (resting) energy.
           if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned') {
-            if (sum > this.pendingWorkout.statsEnergy) {
-              this.pendingWorkout.statsEnergy = sum
-              this.pendingWorkout.statsEnergyUnit = attrs.unit || 'kcal'
-            }
+            this.pendingWorkout.statsEnergy += sum
+            this.pendingWorkout.statsEnergyUnit = attrs.unit || 'kcal'
           } else if (
             statType === 'HKQuantityTypeIdentifierDistanceWalkingRunning' ||
             statType === 'HKQuantityTypeIdentifierDistanceCycling' ||
             statType === 'HKQuantityTypeIdentifierDistanceSwimming'
           ) {
-            // Use the largest distance stat rather than summing — a workout
-            // shouldn't have multiple distance types, but if it does we want
-            // the primary one, not an inflated total
-            if (sum > this.pendingWorkout.statsDistance) {
-              this.pendingWorkout.statsDistance = sum
+            // Sum distance across all segments too
+            this.pendingWorkout.statsDistance += sum
+            if (!this.pendingWorkout.statsDistanceUnit) {
               this.pendingWorkout.statsDistanceUnit = attrs.unit || ''
             }
           }
