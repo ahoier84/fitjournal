@@ -138,6 +138,9 @@ class StreamingXmlProcessor {
 
   // Track the current open Workout element so we can collect its WorkoutStatistics children
   private pendingWorkout: PendingWorkout | null = null
+  // Track whether we're inside a <WorkoutActivity> child — if so, ignore its
+  // WorkoutStatistics because the top-level summary stats cover the same data.
+  private insideWorkoutActivity = false
 
   workoutsFound = 0
   recordsProcessed = 0
@@ -271,12 +274,13 @@ class StreamingXmlProcessor {
   }
 
   private extractWorkouts(text: string) {
-    // Single regex that matches exactly the tags we need, using alternation:
-    // 1. </Workout>                         → closing tag
-    // 2. <WorkoutStatistics\s.../>           → stats child element
-    // 3. <Workout\s...> or <Workout\s.../>   → opening or self-closing workout
-    // The \s after tag names prevents matching WorkoutEvent, WorkoutRoute, etc.
-    const regex = /<\/Workout>|<WorkoutStatistics\s([^>]*?)\/>|<Workout\s([^>]*?)(\/?)>/g
+    // Regex matches the tags we need, using alternation:
+    // 1. </Workout>                         → closing workout tag
+    // 2. <WorkoutActivity\s...>             → opening activity segment
+    // 3. </WorkoutActivity>                 → closing activity segment
+    // 4. <WorkoutStatistics\s.../>          → stats element
+    // 5. <Workout\s...> or <Workout\s.../>  → opening or self-closing workout
+    const regex = /<\/Workout>|<WorkoutActivity\s[^>]*>|<\/WorkoutActivity>|<WorkoutStatistics\s([^>]*?)\/>|<Workout\s([^>]*?)(\/?)>/g
     let match: RegExpExecArray | null
 
     while ((match = regex.exec(text)) !== null) {
@@ -288,32 +292,43 @@ class StreamingXmlProcessor {
           this.finalizeWorkout(this.pendingWorkout)
           this.pendingWorkout = null
         }
+        this.insideWorkoutActivity = false
         continue
       }
 
-      // <WorkoutStatistics .../> — add stats to pending workout
+      // <WorkoutActivity ...> — entering a segment, ignore its stats
+      if (fullMatch.startsWith('<WorkoutActivity')) {
+        this.insideWorkoutActivity = true
+        continue
+      }
+
+      // </WorkoutActivity> — leaving a segment, back to top-level
+      if (fullMatch === '</WorkoutActivity>') {
+        this.insideWorkoutActivity = false
+        continue
+      }
+
+      // <WorkoutStatistics .../> — only use TOP-LEVEL stats (not inside WorkoutActivity)
+      // iOS 16+ workouts have both per-segment stats inside <WorkoutActivity> children
+      // AND top-level summary stats directly under <Workout>. The top-level stats
+      // are pre-computed totals that equal the sum of all segments. Using both
+      // would double-count.
       if (match[1] !== undefined) {
-        if (this.pendingWorkout) {
+        if (this.pendingWorkout && !this.insideWorkoutActivity) {
           this.pendingWorkout.hasWorkoutStatistics = true
           const attrs = parseAttributes(match[1])
           const statType = attrs.type || ''
           const sum = parseFloat(attrs.sum || '0')
 
-          // Sum active energy across all WorkoutActivity segments.
-          // iOS 16+ workouts contain multiple WorkoutActivity children,
-          // each with their own WorkoutStatistics for that segment.
-          // We must SUM them to get the workout total.
-          // Do NOT include basal (resting) energy.
           if (statType === 'HKQuantityTypeIdentifierActiveEnergyBurned') {
-            this.pendingWorkout.statsEnergy += sum
+            this.pendingWorkout.statsEnergy = sum
             this.pendingWorkout.statsEnergyUnit = attrs.unit || 'kcal'
           } else if (
             statType === 'HKQuantityTypeIdentifierDistanceWalkingRunning' ||
             statType === 'HKQuantityTypeIdentifierDistanceCycling' ||
             statType === 'HKQuantityTypeIdentifierDistanceSwimming'
           ) {
-            // Sum distance across all segments too
-            this.pendingWorkout.statsDistance += sum
+            this.pendingWorkout.statsDistance = sum
             if (!this.pendingWorkout.statsDistanceUnit) {
               this.pendingWorkout.statsDistanceUnit = attrs.unit || ''
             }
@@ -338,6 +353,8 @@ class StreamingXmlProcessor {
         const distanceUnit = (attrs.totalDistanceUnit || '').toLowerCase()
         const sourceName = attrs.sourceName || ''
         const creationDate = attrs.creationDate || startDate
+
+        this.insideWorkoutActivity = false
 
         if (isSelfClosing) {
           this.finalizeWorkout({
